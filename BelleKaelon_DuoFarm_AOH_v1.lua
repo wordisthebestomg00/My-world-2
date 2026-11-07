@@ -1,4 +1,4 @@
--- BelleState Utility Hub | BelleKaelonR v2
+-- BelleState Utility Hub | BelleKaelonR v2.1 — Rapid Punch
 -- Experimental Age of Heroes client UI.
 -- Only two controls are implemented: persistent attach to a selected partner,
 -- and a continuous punch loop. All other cards are visual placeholders.
@@ -24,7 +24,7 @@ end
 local S = {
     closed = false, attach = false, punch = false, persist = true,
     targetId = nil, targetName = nil, distance = 3.4,
-    punchInterval = 0.30, punches = 0, nextPunch = 0,
+    punchInterval = 0.10, rapid = true, punches = 0, nextPunch = 0,
     status = "Select a consenting player to start",
     attachStatus = "OFF", punchStatus = "OFF",
     compact = false, page = "Farming", minimized = false,
@@ -251,10 +251,11 @@ text(combatCard,"Infinite Punch",13,91,178,23,12,C.text,false)
 local punchToggle,renderPunch=toggle(combatCard,87,C.red)
 text(combatCard,"Punch Interval",13,127,113,22,11,C.muted,false)
 local minus=button(combatCard,"−",126,124,31,26,C.navy,C.red)
-local intervalLabel=text(combatCard,"0.30s",162,127,51,20,11,C.text,true)
+local intervalLabel=text(combatCard,"0.10s",162,127,51,20,11,C.text,true)
 intervalLabel.TextXAlignment=Enum.TextXAlignment.Center
 local plus=button(combatCard,"+",220,124,31,26,C.navy,C.red)
-text(combatCard,"Server cooldowns still apply",13,161,240,18,10,C.muted,false)
+local rapidButton=button(combatCard,"Rapid: ON",13,158,110,26,C.red,C.red)
+text(combatCard,"Server validates hits",130,161,127,22,10,C.muted,false)
 local punchStatus=text(combatCard,"Punches sent: 0",13,195,245,23,10,C.muted,false)
 
 local safetyCard=card("Safety","Safety",
@@ -371,7 +372,7 @@ local function setPunch(enabled)
         end
         S.punch=true
         S.nextPunch=0
-        note("Continuous punch attempts enabled; server cooldowns still apply")
+        note("Rapid punch enabled at "..string.format("%.2f",S.punchInterval).."s; server cooldowns still apply")
     else
         S.punch=false;S.punchStatus="OFF"
         note("Infinite Punch stopped")
@@ -385,13 +386,23 @@ persistToggle.Activated:Connect(function()
     refreshButtons()
 end)
 punchToggle.Activated:Connect(function() setPunch(not S.punch) end)
-minus.Activated:Connect(function()
-    S.punchInterval=math.min(.80,math.floor((S.punchInterval+.05)*100+.5)/100)
+local function setPunchInterval(value, isRapid)
+    -- Hard cap: no more than ~14 client calls/sec; actual damage is server-authoritative.
+    S.punchInterval=math.clamp(math.floor(value*100+.5)/100,0.07,0.80)
+    S.rapid=isRapid==true
     intervalLabel.Text=string.format("%.2fs",S.punchInterval)
+    rapidButton.Text=S.rapid and "Rapid: ON" or "Rapid: OFF"
+    rapidButton.BackgroundColor3=S.rapid and C.red or C.navy
+    if S.punch then S.nextPunch=os.clock()+S.punchInterval end
+end
+minus.Activated:Connect(function()
+    setPunchInterval(S.punchInterval+0.02,false)
 end)
 plus.Activated:Connect(function()
-    S.punchInterval=math.max(.12,math.floor((S.punchInterval-.05)*100+.5)/100)
-    intervalLabel.Text=string.format("%.2fs",S.punchInterval)
+    setPunchInterval(S.punchInterval-0.02,false)
+end)
+rapidButton.Activated:Connect(function()
+    setPunchInterval(S.rapid and 0.30 or 0.10,not S.rapid)
 end)
 
 local float=button(gui,"◆",18,118,52,52,C.panel,C.purple)
@@ -606,7 +617,8 @@ end)
 task.spawn(function()
     local sequence=1
     while not S.closed do
-        task.wait(.05)
+        -- Fine-grained polling avoids an artificial 50ms wait between rapid attacks.
+        task.wait(.02)
         if S.punch then
             local other=target()
             local c,h,r=body(LP)
