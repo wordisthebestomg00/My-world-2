@@ -1,7 +1,8 @@
 -- BelleState Utility Hub | BelleKaelonR v3 — burst punches and ability controls
 -- Experimental Age of Heroes client UI.
--- Only two controls are implemented: persistent attach to a selected partner,
--- and a continuous punch loop. All other cards are visual placeholders.
+-- Tested only by static inspection: client-side controls for attach, burst punching,
+-- saved teleports, local TK, emergency return, aura, hover and speed. Server-authoritative
+-- abilities, damage, XP and persistence across game sessions are NOT guaranteed.
 -- Punch uses an archived Events.Punch signature; server decides hit/rewards.
 -- Use only with a consenting training partner. No cooldown bypass or remote loader.
 
@@ -929,6 +930,7 @@ function S.Shutdown()
     S.attach=false;S.punch=false;S.closed=true
     clearHeld()
     removeHighlight()
+    if poseConnection then pcall(function() poseConnection:Disconnect() end) end
     if S.flightMover then pcall(function() S.flightMover:Destroy() end) end
     if S.speedHum and S.speedBaseline then
         pcall(function() if S.speedHum.Parent then S.speedHum.WalkSpeed=S.speedBaseline end end)
@@ -1013,43 +1015,49 @@ task.spawn(function()
     end
 end)
 
--- Client-side pose feedback. The server decides whether any attempted
--- punch counts; these arm movements do not change damage or cooldowns.
-task.spawn(function()
-    local cachedCharacter=nil
-    local leftArm,rightArm
-    while not S.closed do
-        task.wait(.03)
-        local ch=LP.Character
-        if ch~=cachedCharacter then
-            cachedCharacter=ch
-            leftArm,rightArm=nil,nil
-            if ch then
-                for _,joint in ipairs(ch:GetDescendants()) do
-                    if joint:IsA("Motor6D") then
-                        if joint.Name=="LeftShoulder" or joint.Name=="Left Shoulder" then
-                            leftArm=joint
-                        elseif joint.Name=="RightShoulder" or joint.Name=="Right Shoulder" then
-                            rightArm=joint
-                        end
+-- Client-side animated punch feedback: this does not change real damage.
+-- PreSimulation is used after Animator pose evaluation; supports both classic
+-- Motor6D rigs and newer avatar AnimationConstraint rigs where available.
+local poseConnection
+local poseCharacter,poseLeft,poseRight,wasPosing
+poseConnection=RunService.PreSimulation:Connect(function()
+    if S.closed then return end
+    local ch=LP.Character
+    if ch~=poseCharacter then
+        poseCharacter=ch
+        poseLeft,poseRight=nil,nil
+        wasPosing=false
+        if ch then
+            for _,joint in ipairs(ch:GetDescendants()) do
+                local isJoint=joint:IsA("Motor6D") or joint:IsA("AnimationConstraint")
+                if isJoint then
+                    if joint.Name=="LeftShoulder" or joint.Name=="Left Shoulder" then
+                        poseLeft=joint
+                    elseif joint.Name=="RightShoulder" or joint.Name=="Right Shoulder" then
+                        poseRight=joint
                     end
                 end
             end
         end
-        local on=(S.punch and os.clock()<S.visualUntil)
-        if leftArm then
+    end
+    local posing=(S.punch and os.clock()<S.visualUntil)
+    if posing or wasPosing then
+        local poseLeftArm=posing and S.visualSide<0
+        local poseRightArm=posing and S.visualSide>0
+        if poseLeft then
             pcall(function()
-                leftArm.Transform=on and S.visualSide<0
-                    and CFrame.Angles(-1.0,0,-0.35) or CFrame.new()
+                poseLeft.Transform=poseLeftArm
+                    and CFrame.Angles(-1.15,0,-.27) or CFrame.new()
             end)
         end
-        if rightArm then
+        if poseRight then
             pcall(function()
-                rightArm.Transform=on and S.visualSide>0
-                    and CFrame.Angles(-1.0,0,0.35) or CFrame.new()
+                poseRight.Transform=poseRightArm
+                    and CFrame.Angles(-1.15,0,.27) or CFrame.new()
             end)
         end
     end
+    wasPosing=posing
 end)
 
 task.spawn(function()
