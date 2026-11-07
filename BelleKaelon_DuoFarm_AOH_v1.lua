@@ -1,395 +1,662 @@
--- BelleKaelon Rogue | Age of Heroes DUO FARM v1 (experimental)
--- Standalone executor-ready Luau; no HTTP, remote loader, or file permissions.
--- Roles: HOST earns the kill XP; TANK cooperates by returning to a farm spot.
--- Sources: historical AOH 'tank farm' pattern; archived AOH Events.Punch arguments.
--- WARNING: unverified against the live game. May violate experience rules.
--- Only target a consenting friend/alternate account; run separately on both clients.
+-- BelleState Utility Hub | BelleKaelonR v2
+-- Experimental Age of Heroes client UI.
+-- Only two controls are implemented: persistent attach to a selected partner,
+-- and a continuous punch loop. All other cards are visual placeholders.
+-- Punch uses an archived Events.Punch signature; server decides hit/rewards.
+-- Use only with a consenting training partner. No cooldown bypass or remote loader.
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local UserInputService = game:GetService("UserInputService")
-local LocalPlayer = Players.LocalPlayer
-if not LocalPlayer then return end
+local RS = game:GetService("ReplicatedStorage")
+local UIS = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local LP = Players.LocalPlayer
+if not LP then return end
 
 local env = (type(getgenv) == "function" and getgenv()) or _G
-if env.BelleKaelonDuo and type(env.BelleKaelonDuo.Shutdown) == "function" then
-    pcall(env.BelleKaelonDuo.Shutdown)
+for _, key in ipairs({"BelleStateUtilityHub", "BelleKaelonDuo"}) do
+    local old = env[key]
+    if type(old) == "table" and type(old.Shutdown) == "function" then
+        pcall(old.Shutdown)
+    end
 end
 
 local S = {
-    running = false, closed = false, runId = 0,
-    profile = "FLASH", role = "HOST", targetLevel = 7000,
-    attackInterval = 0.48, farmSpot = nil, safeSpot = nil,
-    lowHpLimit = 0.20, safetyEnabled = true,
-    partner = nil, status = "Ready: configure both accounts",
-    punchCount = 0, progressKnown = false,
+    closed = false, attach = false, punch = false, persist = true,
+    targetId = nil, targetName = nil, distance = 3.4,
+    punchInterval = 0.30, punches = 0, nextPunch = 0,
+    status = "Select a consenting player to start",
+    attachStatus = "OFF", punchStatus = "OFF",
+    compact = false, page = "Farming", minimized = false,
 }
+env.BelleStateUtilityHub = S
+
 local C = {
-    bg = Color3.fromRGB(15, 15, 31), panel = Color3.fromRGB(27, 24, 49),
-    violet = Color3.fromRGB(164, 101, 255), cyan = Color3.fromRGB(72, 213, 242),
-    white = Color3.fromRGB(240, 238, 255), muted = Color3.fromRGB(164, 160, 191),
-    green = Color3.fromRGB(70, 225, 155), red = Color3.fromRGB(245, 95, 129)
+    bg = Color3.fromRGB(9,13,31),
+    panel = Color3.fromRGB(15,21,43),
+    tile = Color3.fromRGB(22,27,53),
+    navy = Color3.fromRGB(12,17,38),
+    line = Color3.fromRGB(62,71,119),
+    text = Color3.fromRGB(247,245,255),
+    muted = Color3.fromRGB(172,180,210),
+    purple = Color3.fromRGB(171,77,255),
+    green = Color3.fromRGB(42,243,126),
+    blue = Color3.fromRGB(40,188,255),
+    red = Color3.fromRGB(255,83,112),
+    gold = Color3.fromRGB(255,202,68),
 }
-local function inst(class, props, parent)
-    local obj = Instance.new(class)
-    for k, v in pairs(props or {}) do obj[k] = v end
-    if parent then obj.Parent = parent end
-    return obj
+local function make(class, p, parent)
+    local o = Instance.new(class)
+    for k,v in pairs(p or {}) do o[k] = v end
+    if parent then o.Parent = parent end
+    return o
 end
-local function corner(obj, radius)
-    inst("UICorner", {CornerRadius = UDim.new(0, radius or 10)}, obj)
+local function round(o, r)
+    make("UICorner",{CornerRadius=UDim.new(0,r or 10)},o)
 end
-local function setStatus(message)
-    S.status = message
-    print("[BelleKaelon Duo] " .. message)
+local function edge(o,color,thickness,transparency)
+    make("UIStroke",{Color=color,Thickness=thickness or 1,Transparency=transparency or 0},o)
 end
-local function getBody(plr)
-    local ch = plr and plr.Character
-    if not ch then return nil end
-    local hum = ch:FindFirstChildOfClass("Humanoid")
-    local root = ch:FindFirstChild("HumanoidRootPart")
-    if hum and root and hum.Health > 0 then return ch, hum, root end
-    return nil
+local function text(parent,t,x,y,w,h,size,color,bold)
+    return make("TextLabel", {
+        BackgroundTransparency=1,Text=t,TextColor3=color or C.text,
+        Font=bold and Enum.Font.GothamBold or Enum.Font.Gotham,
+        TextSize=size or 12,TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left,
+        Position=UDim2.fromOffset(x,y),Size=UDim2.fromOffset(w,h)
+    },parent)
 end
-local function findPartner(name)
-    name = tostring(name or ""):gsub("^%s+", ""):gsub("%s+$", "")
-    if name == "" then return nil, "Enter your partner's ROBLOX username" end
-    local exact = Players:FindFirstChild(name)
-    if exact and exact ~= LocalPlayer then return exact end
-    local found
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and player.Name:lower() == name:lower() then return player end
-        if player ~= LocalPlayer and player.Name:lower():sub(1, #name) == name:lower() then
-            if found then return nil, "Username prefix ambiguous; type full username" end
-            found = player
-        end
-    end
-    if found then return found end
-    return nil, "Partner is not present in this server"
-end
-local function getPunch()
-    local folder = ReplicatedStorage:FindFirstChild("Events")
-    local remote = folder and folder:FindFirstChild("Punch")
-    if remote and remote:IsA("RemoteEvent") then return remote end
-    return nil
-end
-local function getLevel()
-    local candidates = {}
-    for _, name in ipairs({"leaderstats", "Stats", "Data", "PlayerData", "DataFolder"}) do
-        local folder = LocalPlayer:FindFirstChild(name)
-        if folder then table.insert(candidates, folder) end
-    end
-    table.insert(candidates, LocalPlayer)
-    for _, holder in ipairs(candidates) do
-        if holder then
-            for _, obj in ipairs(holder:GetChildren()) do
-                local n = obj.Name:lower()
-                if n == "level" or n == "lvl" or n == "levels" then
-                    if obj:IsA("IntValue") or obj:IsA("NumberValue") then
-                        return math.floor(obj.Value), "stat"
-                    end
-                end
-            end
-            for _, attr in ipairs({"Level", "Lvl", "level", "LEVEL"}) do
-                local value = holder:GetAttribute(attr)
-                if type(value) == "number" and value >= 0 then return math.floor(value), "attr" end
-            end
-        end
-    end
-    -- Only read a UI label explicitly named for levels; don't confuse it with XP or stats.
-    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-    if pg then
-        local scanned = 0
-        for _, obj in ipairs(pg:GetDescendants()) do
-            scanned = scanned + 1
-            if scanned > 3000 then break end
-            if obj:IsA("TextLabel") then
-                local name = obj.Name:lower()
-                if name == "level" or name == "levellabel" or name == "lvl" or name == "leveltext" then
-                    local text = obj.Text:gsub(",", "")
-                    local numeric = text:match("[Ll][Vv][Ll]?%s*:?%s*(%d+)")
-                        or text:match("[Ll]evel%s*:?%s*(%d+)")
-                        or text:match("^%s*(%d+)%s*$")
-                    if numeric then return tonumber(numeric), "hud" end
-                end
-            end
-        end
-    end
-    return nil, "unknown"
-end
-local function hasForceField(ch)
-    return ch and ch:FindFirstChildOfClass("ForceField") ~= nil
-end
-local function closeFarm()
-    S.running = false
-    S.runId = S.runId + 1
-end
-local ui = inst("ScreenGui", {
-    Name = "BelleKaelonDuoFarm", ResetOnSpawn = false, IgnoreGuiInset = true,
-    DisplayOrder = 809, ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-})
-local parentOk = pcall(function()
-    if type(gethui) == "function" then ui.Parent = gethui() else ui.Parent = game:GetService("CoreGui") end
-end)
-if not parentOk or not ui.Parent then
-    ui.Parent = LocalPlayer:WaitForChild("PlayerGui")
-end
-
-local rootGui = inst("Frame", {
-    Size = UDim2.fromOffset(342, 470), Position = UDim2.new(.5, -171, .5, -235),
-    BackgroundColor3 = C.bg, BorderSizePixel = 0, Active = true
-}, ui)
-corner(rootGui, 14)
-inst("UIStroke", {Color = C.violet, Thickness = 1.4, Transparency = .15}, rootGui)
-
-local header = inst("Frame", {Size = UDim2.new(1,0,0,52), BackgroundColor3 = C.panel,
-    BorderSizePixel = 0, Active = true}, rootGui)
-corner(header, 14)
-inst("TextLabel", {Text = "BELLEKAELON  /  DUO FARM", Font = Enum.Font.GothamBold,
-    TextSize = 16, TextColor3 = C.white, TextXAlignment = Enum.TextXAlignment.Left,
-    Position = UDim2.fromOffset(12, 5), Size = UDim2.new(1,-54,0,23), BackgroundTransparency = 1}, header)
-inst("TextLabel", {Text = "Age of Heroes  |  Flash + Kaella", Font = Enum.Font.Gotham,
-    TextSize = 11, TextColor3 = C.cyan, TextXAlignment = Enum.TextXAlignment.Left,
-    Position = UDim2.fromOffset(12, 28), Size = UDim2.new(1,-54,0,18), BackgroundTransparency = 1}, header)
-local x = inst("TextButton", {Text = "×", TextSize = 23, Font = Enum.Font.GothamBold,
-    TextColor3 = C.white, BackgroundColor3 = Color3.fromRGB(93,38,68),
-    Size = UDim2.fromOffset(29,28), Position = UDim2.new(1,-36,0,11), BorderSizePixel = 0}, header)
-corner(x, 7)
-
-local scroll = inst("ScrollingFrame", {
-    Position = UDim2.fromOffset(11, 60), Size = UDim2.new(1,-22,1,-70),
-    CanvasSize = UDim2.fromScale(0,0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
-    BackgroundTransparency = 1, ScrollBarThickness = 4, ScrollBarImageColor3 = C.violet,
-    BorderSizePixel = 0, ScrollingDirection = Enum.ScrollingDirection.Y
-}, rootGui)
-inst("UIListLayout", {FillDirection = Enum.FillDirection.Vertical,
-    HorizontalAlignment = Enum.HorizontalAlignment.Center,
-    SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0,6)}, scroll)
-
-local function label(text, size, color, height)
-    return inst("TextLabel", {
-        Text = text, Font = Enum.Font.Gotham, TextSize = size or 12,
-        TextColor3 = color or C.white, BackgroundTransparency = 1,
-        TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
-        Size = UDim2.new(1, -4, 0, height or 22)
-    }, scroll)
-end
-local function rowButtons(left, right, leftCB, rightCB)
-    local row = inst("Frame", {Size = UDim2.new(1,-2,0,36), BackgroundTransparency = 1}, scroll)
-    local a = inst("TextButton", {Text = left, Font = Enum.Font.GothamBold, TextSize = 12,
-        TextColor3 = C.white, BackgroundColor3 = C.panel, Size = UDim2.new(.49,0,1,0), BorderSizePixel = 0}, row)
-    local b = inst("TextButton", {Text = right, Font = Enum.Font.GothamBold, TextSize = 12,
-        TextColor3 = C.white, BackgroundColor3 = C.panel, Size = UDim2.new(.49,0,1,0),
-        Position = UDim2.new(.51,0,0,0), BorderSizePixel = 0}, row)
-    corner(a,8); corner(b,8)
-    if leftCB then a.MouseButton1Click:Connect(function() leftCB(a,b) end) end
-    if rightCB then b.MouseButton1Click:Connect(function() rightCB(a,b) end) end
-    return a,b
-end
-local function input(placeholder, initial)
-    local box = inst("TextBox", {Text = initial or "", PlaceholderText = placeholder,
-        ClearTextOnFocus = false, Font = Enum.Font.Gotham, TextSize = 13,
-        TextColor3 = C.white, PlaceholderColor3 = C.muted, BackgroundColor3 = C.panel,
-        Size = UDim2.new(1,-2,0,36), BorderSizePixel=0}, scroll)
-    corner(box,8)
-    inst("UIPadding", {PaddingLeft = UDim.new(0,9), PaddingRight = UDim.new(0,9)}, box)
-    return box
-end
-local function wideButton(text, bg, cb)
-    local b = inst("TextButton", {Text=text, Font=Enum.Font.GothamBold, TextSize=13,
-        TextColor3=C.white, BackgroundColor3=bg, BorderSizePixel=0,
-        Size=UDim2.new(1,-2,0,38)}, scroll)
-    corner(b,8)
-    if cb then b.MouseButton1Click:Connect(cb) end
+local function button(parent,t,x,y,w,h,color,accent)
+    local b=make("TextButton",{
+        BackgroundColor3=color or C.tile,BorderSizePixel=0,
+        Text=t,TextColor3=C.text,Font=Enum.Font.GothamBold,
+        TextSize=12,AutoButtonColor=true,
+        Position=UDim2.fromOffset(x,y),Size=UDim2.fromOffset(w,h)
+    },parent)
+    round(b,8)
+    edge(b,accent or C.line,1,0.30)
     return b
 end
+local function note(t)
+    S.status=t
+    print("[BelleState] "..t)
+end
 
-label("CHARACTER / TARGET LEVEL", 12, C.cyan, 19)
-local profileA, profileB = rowButtons("FLASH  →  7000", "KAELLA  →  6000",
-    function() S.profile="FLASH"; S.targetLevel=7000; setStatus("Flash profile selected") end,
-    function() S.profile="KAELLA"; S.targetLevel=6000; setStatus("Kaella profile selected") end)
-label("Choose the profile for THIS client. Set role separately.", 11, C.muted, 20)
-label("DUO ROLE", 12, C.cyan, 18)
-local hostButton, tankButton = rowButtons("HOST  /  Attacker", "TANK  /  Partner",
-    function() S.role="HOST"; setStatus("HOST: move to partner and punch") end,
-    function() S.role="TANK"; setStatus("TANK: return to this farm spot after death") end)
-label("PARTNER ROBLOX USERNAME (must be in your server)", 11, C.muted, 20)
-local partnerInput = input("Exact account username (not display name)", "")
-label("HOST follows and attacks selected partner only. TANK holds your farm position.", 11, C.muted, 36)
-label("OPTIONS", 12, C.cyan, 18)
-local safetyButton, spotButton = rowButtons("Host safety: ON", "Save safe spot",
-    function(btn)
-        S.safetyEnabled = not S.safetyEnabled
-        btn.Text = "Host safety: " .. (S.safetyEnabled and "ON" or "OFF")
-    end,
-    function()
-        local _,_,rp = getBody(LocalPlayer)
-        if rp then S.safeSpot = rp.CFrame; setStatus("Safe spot saved at current position")
-        else setStatus("Unable to save: your character is not alive") end
-    end)
-local anchorButton = wideButton("Set / Update tank farm spot here", C.panel, function()
-    local _,_,rp = getBody(LocalPlayer)
-    if rp then S.farmSpot = rp.CFrame; setStatus("Tank farm spot saved")
-    else setStatus("Cannot save farm spot: not alive") end
+local function body(player)
+    local ch=player and player.Character
+    if not ch then return nil end
+    local h=ch:FindFirstChildOfClass("Humanoid")
+    local root=ch:FindFirstChild("HumanoidRootPart")
+    if not h or not root or h.Health<=0 then return nil end
+    return ch,h,root
+end
+local function target()
+    if not S.targetName or not S.targetId then return nil end
+    local player=Players:GetPlayerByUserId(S.targetId)
+    if not player then
+        player=Players:FindFirstChild(S.targetName)
+        if player and player.UserId~=S.targetId then return nil end
+    end
+    if player==LP then return nil end
+    return player
+end
+local function punchRemote()
+    local e=RS:FindFirstChild("Events")
+    local p=e and e:FindFirstChild("Punch")
+    return p and p:IsA("RemoteEvent") and p or nil
+end
+
+local gui=make("ScreenGui",{
+    Name="BelleStateUtilityHub",ResetOnSpawn=false,
+    IgnoreGuiInset=true,DisplayOrder=799,
+    ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+})
+local ok=pcall(function()
+    if type(gethui)=="function" then gui.Parent=gethui()
+    else gui.Parent=game:GetService("CoreGui") end
 end)
-label("Target XP levels are NOT awarded by this script. The server decides XP.", 10, C.muted, 30)
-local levelLabel = label("Your level: scanning...", 12, C.white, 20)
-local settingsLabel = label("Selected: FLASH | HOST | Goal: 7000", 11, C.cyan, 20)
-local statusLabel = label("Ready", 11, C.white, 44)
-local startButton, stopButton = rowButtons("▶ START FARM", "■ STOP",
-    function() end,
-    function() closeFarm(); setStatus("Stopped manually") end)
-startButton.BackgroundColor3 = Color3.fromRGB(33,119,93)
-stopButton.BackgroundColor3 = Color3.fromRGB(126,43,69)
-wideButton("Close / remove hub", Color3.fromRGB(67,47,79), function() S.Shutdown() end)
+if not ok or not gui.Parent then gui.Parent=LP:WaitForChild("PlayerGui") end
 
--- The host only attacks a selected, present partner. No KillAll/other-player target fallback.
-local function hostLoop(token, friend)
-    local punch = getPunch()
-    if not punch then setStatus("MISSING remote: ReplicatedStorage.Events.Punch (game updated?)"); closeFarm(); return end
-    setStatus("HOST running; follow partner and attack after ForceField clears")
-    local sequence, lastAttack, lastMove = 1, 0, 0
-    while S.running and not S.closed and S.runId == token do
-        task.wait(0.10)
-        if not friend.Parent then setStatus("Partner left; stopping"); closeFarm(); break end
-        local localChar, me, myRoot = getBody(LocalPlayer)
-        local friendChar, theirHum, theirRoot = getBody(friend)
-        if localChar and me and myRoot then
-            if S.safetyEnabled and (me.Health / math.max(me.MaxHealth,1)) < S.lowHpLimit then
-                if S.safeSpot then
-                    pcall(function() myRoot.CFrame = S.safeSpot end)
-                    setStatus("HOST low HP: retreating to saved safe spot")
-                else
-                    setStatus("HOST low HP: paused (save a safe spot)")
-                end
-                repeat task.wait(.65) until not S.running or S.runId ~= token
-                    or me.Health <= 0 or (me.Health / math.max(me.MaxHealth,1)) >= .55
-            elseif friendChar and theirHum and theirRoot and not hasForceField(friendChar) then
-                local now = os.clock()
-                if now - lastMove >= .18 then
-                    lastMove = now
-                    local newPos = theirRoot.Position + theirRoot.CFrame.LookVector * 2.6
-                    pcall(function()
-                        myRoot.AssemblyLinearVelocity = Vector3.zero
-                        myRoot.CFrame = CFrame.lookAt(newPos, theirRoot.Position)
-                    end)
-                end
-                if now - lastAttack >= S.attackInterval then
-                    lastAttack = now
-                    local ok, err = pcall(function() punch:FireServer(0, 0.18, sequence) end)
-                    if ok then S.punchCount = S.punchCount + 1
-                    else setStatus("Punch call error: " .. tostring(err):sub(1,90)) end
-                    sequence = sequence % 5 + 1
-                end
-            end
-        end
+local shadow=make("Frame",{
+    BackgroundColor3=Color3.new(0,0,0),BackgroundTransparency=.45,
+    BorderSizePixel=0,Size=UDim2.fromOffset(1050,634),
+    Position=UDim2.fromOffset(0,0)
+},gui)
+round(shadow,22)
+local root=make("Frame",{
+    Name="Hub",BackgroundColor3=C.bg,BorderSizePixel=0,
+    Active=true,ClipsDescendants=true,
+    Size=UDim2.fromOffset(1050,634)
+},gui)
+round(root,19)
+edge(root,C.purple,1.6,.12)
+make("UIGradient",{
+    Color=ColorSequence.new({
+        ColorSequenceKeypoint.new(0,Color3.fromRGB(17,20,52)),
+        ColorSequenceKeypoint.new(1,C.bg)}),
+    Rotation=85
+},root)
+
+local header=make("Frame",{
+    Name="DragHandle",Active=true,BackgroundColor3=C.navy,
+    BorderSizePixel=0,Size=UDim2.fromOffset(1050,92)
+},root)
+round(header,18)
+text(header,"◈",18,17,63,54,49,C.purple,true)
+local mainTitle=text(header,"BelleState Utility Hub",92,13,475,43,28,C.text,true)
+local subTitle=text(header,"Age of Heroes • BelleKaelonR",95,56,465,22,14,C.muted,false)
+local hpDisplay=text(header,"♥ Health: --/--",650,17,198,25,13,C.green,true)
+local activeDisplay=text(header,"● Online  |  2 active modules",650,47,250,23,12,C.blue,true)
+local minimize=button(header,"−",968,21,30,31,C.panel,C.line)
+local close=button(header,"×",1003,21,30,31,C.panel,C.red)
+
+local sidebar=make("Frame",{
+    BackgroundColor3=C.navy,BackgroundTransparency=.25,BorderSizePixel=0,
+    Position=UDim2.fromOffset(10,102),Size=UDim2.fromOffset(156,486)
+},root)
+round(sidebar,12)
+edge(sidebar,C.line,1,.55)
+
+local content=make("ScrollingFrame",{
+    BackgroundTransparency=1,BorderSizePixel=0,
+    Position=UDim2.fromOffset(176,102),Size=UDim2.fromOffset(864,486),
+    ScrollBarThickness=4,ScrollBarImageColor3=C.purple,
+    CanvasSize=UDim2.fromOffset(0,0),
+    ScrollingDirection=Enum.ScrollingDirection.Y
+},root)
+local layout=make("UIGridLayout",{
+    SortOrder=Enum.SortOrder.LayoutOrder,
+    CellSize=UDim2.fromOffset(270,225),
+    CellPadding=UDim2.fromOffset(10,10),
+    HorizontalAlignment=Enum.HorizontalAlignment.Center
+},content)
+local footer=make("Frame",{
+    BackgroundColor3=C.navy,BorderSizePixel=0,
+    Position=UDim2.fromOffset(10,592),Size=UDim2.fromOffset(1030,34)
+},root)
+round(footer,8)
+edge(footer,C.line,1,.55)
+local footerText=text(footer,"◆ BelleState Hub   |   Attach: OFF   |   Punch: OFF",10,5,730,24,11,C.muted,true)
+local footerStatus=text(footer,"Experimental build",740,5,285,24,11,C.muted,false)
+footerStatus.TextXAlignment=Enum.TextXAlignment.Right
+
+local cards={}
+local function card(key,title,desc,color,icon,order,tag)
+    local f=make("Frame",{
+        Name=key,BackgroundColor3=C.panel,BorderSizePixel=0,
+        LayoutOrder=order,Size=UDim2.fromOffset(270,225)
+    },content)
+    round(f,13);edge(f,color,1.5,.12)
+    make("UIGradient",{
+        Color=ColorSequence.new(C.tile,C.panel),Rotation=90
+    },f)
+    text(f,icon,13,11,34,38,29,color,true)
+    text(f,title,52,12,178,25,18,C.text,true)
+    text(f,desc,52,38,195,35,10,C.muted,false)
+    local badge=text(f,tag or "SOON",208,11,55,20,10,tag=="READY" and C.green or C.muted,true)
+    badge.TextXAlignment=Enum.TextXAlignment.Right
+    local line=make("Frame",{
+        BackgroundColor3=color,BackgroundTransparency=.65,BorderSizePixel=0,
+        Position=UDim2.fromOffset(10,77),Size=UDim2.new(1,-20,0,1)
+    },f)
+    cards[key]={frame=f,color=color,badge=badge,line=line}
+    return f
+end
+local function row(parent,label,y,shade)
+    text(parent,label,13,y,168,25,11,shade or C.text,false)
+    make("Frame",{
+        BackgroundColor3=C.line,BackgroundTransparency=.72,
+        BorderSizePixel=0,Position=UDim2.fromOffset(12,y+27),
+        Size=UDim2.new(1,-24,0,1)
+    },parent)
+end
+local function toggle(parent,y,onColor)
+    local b=button(parent,"OFF",202,y,55,26,C.tile,onColor)
+    local function render(on)
+        b.Text=on and "ON" or "OFF"
+        b.BackgroundColor3=on and onColor or C.navy
+        return b
     end
+    render(false)
+    return b,render
 end
 
--- TANK does not attack. It returns to a fixed spot after dying/being knocked away.
-local function tankLoop(token, friend)
-    if not S.farmSpot then
-        local _,_,rp = getBody(LocalPlayer)
-        if rp then S.farmSpot = rp.CFrame end
+local telekinesis=card("Telekinesis","Telekinesis",
+    "Control, hold and manipulate objects with your mind.",C.purple,"✦",1,"SOON")
+row(telekinesis,"Anti Grab",91,C.muted)
+row(telekinesis,"Multi Grab",129,C.muted)
+row(telekinesis,"Infinite Grab",167,C.muted)
+text(telekinesis,"Planned module",160,196,100,18,9,C.muted,false)
+
+local attachCard=card("Farming","Attach System",
+    "Persistent target following across character respawns.",C.green,"↗",2,"READY")
+local playerButton=button(attachCard,"Select player  ▾",12,84,246,31,C.navy,C.green)
+local attachText=text(attachCard,"Infinite Attach Loop",13,126,173,24,11,C.text,false)
+local attachToggle,renderAttach=toggle(attachCard,123,C.green)
+text(attachCard,"Continue after death / respawn",13,160,176,25,10,C.text,false)
+local persistToggle,renderPersist=toggle(attachCard,157,C.green)
+local attachStatus=text(attachCard,"Status: OFF",13,196,245,23,10,C.muted,false)
+renderPersist(true)
+
+local teleportCard=card("Teleport","Teleport",
+    "Waypoints and travel tools for your own world.",C.blue,"◎",3,"SOON")
+row(teleportCard,"Safe Zone",91,C.muted)
+row(teleportCard,"Quest Area",129,C.muted)
+row(teleportCard,"Training Area",167,C.muted)
+text(teleportCard,"Planned module",160,196,100,18,9,C.muted,false)
+
+local combatCard=card("Combat","Combat",
+    "Continuous punch attempts at a selected partner.",C.red,"✊",4,"READY")
+text(combatCard,"Infinite Punch",13,91,178,23,12,C.text,false)
+local punchToggle,renderPunch=toggle(combatCard,87,C.red)
+text(combatCard,"Punch Interval",13,127,113,22,11,C.muted,false)
+local minus=button(combatCard,"−",126,124,31,26,C.navy,C.red)
+local intervalLabel=text(combatCard,"0.30s",162,127,51,20,11,C.text,true)
+intervalLabel.TextXAlignment=Enum.TextXAlignment.Center
+local plus=button(combatCard,"+",220,124,31,26,C.navy,C.red)
+text(combatCard,"Server cooldowns still apply",13,161,240,18,10,C.muted,false)
+local punchStatus=text(combatCard,"Punches sent: 0",13,195,245,23,10,C.muted,false)
+
+local safetyCard=card("Safety","Safety",
+    "Health monitoring and defensive presets.",C.gold,"⬡",5,"SOON")
+row(safetyCard,"Emergency Escape",91,C.muted)
+row(safetyCard,"Safe Return",129,C.muted)
+row(safetyCard,"Health Threshold",167,C.muted)
+text(safetyCard,"Planned module",160,196,100,18,9,C.muted,false)
+
+local allCard=card("All","All Abilities",
+    "Master controls for the full BelleState build.",C.purple,"◆",6,"SOON")
+row(allCard,"Aura Sense",91,C.muted)
+row(allCard,"Flight Assist",129,C.muted)
+row(allCard,"Speed Burst",167,C.muted)
+text(allCard,"Planned module",160,196,100,18,9,C.muted,false)
+
+local pages={
+    {"✦","Telekinesis"},{"♧","Farming"},{"◎","Teleport"},
+    {"✊","Combat"},{"⬡","Safety"},{"◆","All"},
+}
+local navButtons={}
+for i,entry in ipairs(pages) do
+    local b=button(sidebar,entry[1].."  "..entry[2],9,11+(i-1)*66,138,56,C.tile,C.line)
+    b.TextXAlignment=Enum.TextXAlignment.Left
+    navButtons[entry[2]]=b
+end
+local overlay=make("Frame",{
+    Visible=false,Active=true,BackgroundColor3=Color3.new(0,0,0),
+    BackgroundTransparency=.24,BorderSizePixel=0,
+    Size=UDim2.fromScale(1,1),ZIndex=20
+},root)
+local chooser=make("Frame",{
+    BackgroundColor3=C.panel,BorderSizePixel=0,Size=UDim2.fromOffset(320,350),
+    AnchorPoint=Vector2.new(.5,.5),Position=UDim2.fromScale(.5,.5),ZIndex=21
+},overlay)
+round(chooser,13);edge(chooser,C.green,1.5,0)
+local chooserTitle=text(chooser,"Select training partner",15,12,250,29,17,C.text,true)
+chooserTitle.ZIndex=22
+local pickerClose=button(chooser,"×",277,12,30,30,C.navy,C.red)
+pickerClose.ZIndex=23
+local pickerList=make("ScrollingFrame",{
+    BackgroundTransparency=1,BorderSizePixel=0,Position=UDim2.fromOffset(10,55),
+    Size=UDim2.fromOffset(300,284),CanvasSize=UDim2.fromOffset(0,0),
+    ScrollBarThickness=4,ScrollBarImageColor3=C.green,ZIndex=22
+},chooser)
+local pickerLayout=make("UIListLayout",{
+    Padding=UDim.new(0,6),SortOrder=Enum.SortOrder.LayoutOrder
+},pickerList)
+pickerLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    pickerList.CanvasSize=UDim2.fromOffset(0,pickerLayout.AbsoluteContentSize.Y+10)
+end)
+local function choosePlayer(plr)
+    if not plr or plr==LP then return end
+    S.targetId=plr.UserId;S.targetName=plr.Name
+    playerButton.Text=plr.DisplayName.."  ▾"
+    note("Target selected: @"..plr.Name)
+    overlay.Visible=false
+end
+local function openPicker()
+    for _,node in ipairs(pickerList:GetChildren()) do
+        if node:IsA("TextButton") or node:IsA("TextLabel") then node:Destroy() end
     end
-    if not S.farmSpot then setStatus("Stand somewhere alive to set the farm spot"); closeFarm(); return end
-    setStatus("TANK active: holding farm spot; HOST should target your username")
-    while S.running and not S.closed and S.runId == token do
-        task.wait(.5)
-        if not friend.Parent then setStatus("Partner left; stopping"); closeFarm(); break end
-        local _,hum,rp = getBody(LocalPlayer)
-        if hum and rp and S.farmSpot then
-            if (rp.Position - S.farmSpot.Position).Magnitude > 3 then
-                pcall(function()
-                    rp.AssemblyLinearVelocity = Vector3.zero
-                    rp.CFrame = S.farmSpot
-                end)
-            end
+    local others={}
+    for _,plr in ipairs(Players:GetPlayers()) do
+        if plr~=LP then table.insert(others,plr) end
+    end
+    table.sort(others,function(a,b) return a.Name:lower()<b.Name:lower() end)
+    if #others==0 then
+        local no=text(pickerList,"No other players in this server.",8,8,280,40,12,C.muted,false)
+        no.ZIndex=23
+    else
+        for i,plr in ipairs(others) do
+            local item=button(pickerList,plr.DisplayName.."  (@"..plr.Name..")",
+                0,0,292,36,C.navy,C.line)
+            item.LayoutOrder=i
+            item.ZIndex=23
+            item.Activated:Connect(function() choosePlayer(plr) end)
         end
     end
+    overlay.Visible=true
 end
+playerButton.Activated:Connect(openPicker)
+pickerClose.Activated:Connect(function() overlay.Visible=false end)
 
-local function startFarm()
-    if S.running then setStatus("Already running; STOP first to change roles"); return end
-    local friend, err = findPartner(partnerInput.Text)
-    if not friend then setStatus(err); return end
-    if friend == LocalPlayer then setStatus("Cannot select yourself"); return end
-    S.partner = friend
-    local level = getLevel()
-    if level and level >= S.targetLevel then
-        setStatus("Already at goal level " .. tostring(S.targetLevel) .. "; not starting")
-        return
+local function refreshButtons()
+    renderAttach(S.attach)
+    renderPersist(S.persist)
+    renderPunch(S.punch)
+end
+local function setAttach(enabled)
+    if enabled then
+        if not target() then
+            note("Choose a player in the same server first")
+            S.attach=false;refreshButtons();return
+        end
+        S.attach=true
+        note("Attach loop enabled; will reacquire after respawns")
+    else
+        S.attach=false
+        S.attachStatus="OFF"
+        note("Attach stopped")
     end
-    if not level then setStatus("WARNING: level unreadable; auto-stop cannot be guaranteed") end
-    if S.role == "HOST" and not getPunch() then
-        setStatus("Punch RemoteEvent not found: old game API may be outdated")
-        return
+    refreshButtons()
+end
+local function setPunch(enabled)
+    if enabled then
+        if not target() then
+            note("Choose a consenting training partner first")
+            S.punch=false;refreshButtons();return
+        end
+        if not punchRemote() then
+            note("Punch RemoteEvent missing; old Age of Heroes API may have changed")
+            S.punch=false;refreshButtons();return
+        end
+        S.punch=true
+        S.nextPunch=0
+        note("Continuous punch attempts enabled; server cooldowns still apply")
+    else
+        S.punch=false;S.punchStatus="OFF"
+        note("Infinite Punch stopped")
     end
-    if S.role == "TANK" and not S.farmSpot then
-        local _,_,rp = getBody(LocalPlayer)
-        if rp then S.farmSpot = rp.CFrame end
+    refreshButtons()
+end
+attachToggle.Activated:Connect(function() setAttach(not S.attach) end)
+persistToggle.Activated:Connect(function()
+    S.persist=not S.persist
+    note(S.persist and "Respawn continuation ON" or "Respawn continuation OFF")
+    refreshButtons()
+end)
+punchToggle.Activated:Connect(function() setPunch(not S.punch) end)
+minus.Activated:Connect(function()
+    S.punchInterval=math.min(.80,math.floor((S.punchInterval+.05)*100+.5)/100)
+    intervalLabel.Text=string.format("%.2fs",S.punchInterval)
+end)
+plus.Activated:Connect(function()
+    S.punchInterval=math.max(.12,math.floor((S.punchInterval-.05)*100+.5)/100)
+    intervalLabel.Text=string.format("%.2fs",S.punchInterval)
+end)
+
+local float=button(gui,"◆",18,118,52,52,C.panel,C.purple)
+float.TextSize=23
+float.Visible=false
+local screenW,screenH=1100,700
+local mobile=false
+local firstLayout=true
+local function clampPosition(x,y,w,h)
+    return math.clamp(x,0,math.max(0,screenW-w)),
+        math.clamp(y,0,math.max(0,screenH-h))
+end
+local function applyPage()
+    for name,b in pairs(navButtons) do
+        local active=(S.page==name)
+        b.BackgroundColor3=active and Color3.fromRGB(65,34,104) or C.tile
     end
-    S.running = true
-    S.punchCount = 0
-    S.runId = S.runId + 1
-    local token = S.runId
-    task.spawn(function()
-        if S.role == "HOST" then hostLoop(token,friend) else tankLoop(token,friend) end
+    for name,record in pairs(cards) do
+        record.frame.Visible=(not mobile) or S.page=="All" or S.page==name
+    end
+    content.CanvasPosition=Vector2.new(0,0)
+end
+for name,b in pairs(navButtons) do
+    b.Activated:Connect(function()
+        S.page=name
+        applyPage()
+        if name~="Farming" and name~="Combat" then
+            note(name.." controls are coming in a later build")
+        end
     end)
 end
-startButton.MouseButton1Click:Connect(startFarm)
+local function redraw()
+    local cam=workspace.CurrentCamera
+    local vp=cam and cam.ViewportSize or Vector2.new(1100,700)
+    screenW,screenH=vp.X,vp.Y
+    mobile=vp.X<780
+    local width=mobile and math.max(270,math.min(430,vp.X-18))
+        or math.min(1050,vp.X-24)
+    local height=mobile and math.max(325,math.min(580,vp.Y-24))
+        or math.min(634,vp.Y-24)
+    root.Size=UDim2.fromOffset(width,height)
+    shadow.Size=UDim2.fromOffset(width,height)
+    header.Size=UDim2.fromOffset(width,92)
+    local sideWidth=mobile and 68 or 156
+    sidebar.Size=UDim2.fromOffset(sideWidth,height-148)
+    content.Position=UDim2.fromOffset(sideWidth+20,102)
+    local cw=width-sideWidth-31
+    local ch=height-148
+    content.Size=UDim2.fromOffset(cw,ch)
+    footer.Position=UDim2.fromOffset(10,height-39)
+    footer.Size=UDim2.fromOffset(width-20,32)
+    local cols=mobile and 1 or 3
+    local cardW=math.max(180,math.floor((cw-20-(cols-1)*10)/cols))
+    layout.CellSize=UDim2.fromOffset(cardW,mobile and 229 or 225)
+    layout.CellPadding=UDim2.fromOffset(10,10)
+    for _,record in pairs(cards) do
+        local f=record.frame
+        -- Child elements use proportional right-alignment for touch targets.
+        for _,child in ipairs(f:GetChildren()) do
+            if child:IsA("TextButton") and child~=playerButton
+                and child~=minus and child~=plus then
+                if child.Position.X.Offset==202 then
+                    child.Position=UDim2.new(1,-68,0,child.Position.Y.Offset)
+                end
+            end
+        end
+        if f==attachCard then
+            playerButton.Size=UDim2.new(1,-24,0,31)
+        end
+    end
+    for i,entry in ipairs(pages) do
+        local b=navButtons[entry[2]]
+        b.Position=UDim2.fromOffset(8,10+(i-1)*66)
+        b.Size=UDim2.fromOffset(sideWidth-16,54)
+        b.Text=mobile and entry[1] or entry[1].."  "..entry[2]
+        b.TextXAlignment=mobile and Enum.TextXAlignment.Center or Enum.TextXAlignment.Left
+        b.TextSize=mobile and 22 or 12
+    end
+    mainTitle.Position=UDim2.fromOffset(mobile and 62 or 92,15)
+    mainTitle.Size=UDim2.fromOffset(mobile and width-130 or 480,37)
+    mainTitle.TextSize=mobile and 18 or 28
+    subTitle.Position=UDim2.fromOffset(mobile and 64 or 95,55)
+    subTitle.Size=UDim2.fromOffset(mobile and width-132 or 460,20)
+    subTitle.TextSize=mobile and 10 or 14
+    hpDisplay.Visible=not mobile
+    activeDisplay.Visible=not mobile
+    minimize.Position=UDim2.fromOffset(width-80,20)
+    close.Position=UDim2.fromOffset(width-44,20)
+    footerText.Size=UDim2.fromOffset(mobile and width-20 or 690,24)
+    footerText.TextSize=mobile and 9 or 11
+    footerStatus.Visible=not mobile
+    if not firstLayout then
+        local x,y=clampPosition(root.Position.X.Offset,root.Position.Y.Offset,width,height)
+        root.Position=UDim2.fromOffset(x,y)
+    else
+        root.Position=UDim2.fromOffset(math.max(0,(vp.X-width)/2),math.max(0,(vp.Y-height)/2))
+        firstLayout=false
+    end
+    shadow.Position=root.Position+UDim2.fromOffset(5,6)
+    chooser.Size=UDim2.fromOffset(math.min(320,width-32),math.min(350,height-40))
+    pickerList.Size=UDim2.new(1,-20,1,-66)
+    pickerClose.Position=UDim2.new(1,-43,0,12)
+    float.Position=UDim2.fromOffset(screenW-65,screenH-82)
+    applyPage()
+end
+layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    content.CanvasSize=UDim2.fromOffset(0,layout.AbsoluteContentSize.Y+14)
+end)
+local cam=workspace.CurrentCamera
+if cam then cam:GetPropertyChangedSignal("ViewportSize"):Connect(redraw) end
+redraw()
+
+-- Drag the hub by its title bar (mouse or mobile touch), clamped on-screen.
+local dragging=false
+local dragInput=nil
+local dragAt=nil
+local dragOrigin=nil
+header.InputBegan:Connect(function(input)
+    if input.UserInputType~=Enum.UserInputType.Touch
+        and input.UserInputType~=Enum.UserInputType.MouseButton1 then return end
+    dragging=true;dragInput=input;dragAt=input.Position;dragOrigin=root.Position
+    input.Changed:Connect(function()
+        if input.UserInputState==Enum.UserInputState.End then dragging=false end
+    end)
+end)
+UIS.InputChanged:Connect(function(input)
+    if not dragging or S.closed or not dragAt then return end
+    if dragInput.UserInputType==Enum.UserInputType.Touch then
+        if input~=dragInput then return end
+    elseif input.UserInputType~=Enum.UserInputType.MouseMovement then
+        return
+    end
+    local delta=input.Position-dragAt
+    local x,y=clampPosition(dragOrigin.X.Offset+delta.X,
+        dragOrigin.Y.Offset+delta.Y,root.AbsoluteSize.X,root.AbsoluteSize.Y)
+    root.Position=UDim2.fromOffset(x,y)
+    shadow.Position=UDim2.fromOffset(x+5,y+6)
+end)
+
+local floatDrag=false
+local floatFrom=nil
+local floatStart=nil
+local floatMoved=false
+float.InputBegan:Connect(function(input)
+    if input.UserInputType~=Enum.UserInputType.Touch and
+        input.UserInputType~=Enum.UserInputType.MouseButton1 then return end
+    floatDrag=true;floatFrom=input.Position;floatStart=float.Position;floatMoved=false
+    input.Changed:Connect(function()
+        if input.UserInputState==Enum.UserInputState.End then floatDrag=false end
+    end)
+end)
+UIS.InputChanged:Connect(function(input)
+    if not floatDrag or not floatFrom then return end
+    if input.UserInputType~=Enum.UserInputType.Touch and
+        input.UserInputType~=Enum.UserInputType.MouseMovement then return end
+    local delta=input.Position-floatFrom
+    if delta.Magnitude>5 then floatMoved=true end
+    local x,y=clampPosition(floatStart.X.Offset+delta.X,
+        floatStart.Y.Offset+delta.Y,52,52)
+    float.Position=UDim2.fromOffset(x,y)
+end)
+local function setMinimized(value)
+    S.minimized=value
+    root.Visible=not value
+    shadow.Visible=not value
+    float.Visible=value
+end
+minimize.Activated:Connect(function() setMinimized(true) end)
+float.Activated:Connect(function()
+    if not floatMoved then setMinimized(false) end
+end)
 
 function S.Shutdown()
     if S.closed then return end
-    closeFarm()
-    S.closed = true
-    pcall(function() ui:Destroy() end)
-    env.BelleKaelonDuo = nil
+    S.attach=false;S.punch=false;S.closed=true
+    pcall(function() gui:Destroy() end)
+    if env.BelleStateUtilityHub==S then env.BelleStateUtilityHub=nil end
 end
-x.MouseButton1Click:Connect(S.Shutdown)
-env.BelleKaelonDuo = S
+close.Activated:Connect(S.Shutdown)
 
--- Touch+mouse drag support, intentionally only when interacting with the header.
-local dragging, dragStart, startPos = false, nil, nil
-header.InputBegan:Connect(function(inp)
-    if inp.UserInputType == Enum.UserInputType.Touch or inp.UserInputType == Enum.UserInputType.MouseButton1 then
-        dragging=true; dragStart=inp.Position; startPos=rootGui.Position
-        inp.Changed:Connect(function() if inp.UserInputState == Enum.UserInputState.End then dragging=false end end)
-    end
-end)
-UserInputService.InputChanged:Connect(function(inp)
-    if not dragging or not dragStart or not startPos or S.closed then return end
-    if inp.UserInputType ~= Enum.UserInputType.Touch and inp.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-    local delta=inp.Position-dragStart
-    rootGui.Position=UDim2.new(startPos.X.Scale, startPos.X.Offset+delta.X,
-        startPos.Y.Scale, startPos.Y.Offset+delta.Y)
-end)
-
--- Read actual server-controlled level if possible; never fabricate progress.
+local observedAlive=false
 task.spawn(function()
     while not S.closed do
-        local level, source = getLevel()
-        if level then
-            S.progressKnown = true
-            levelLabel.Text = string.format("Level: %d / %d  [%s]", level, S.targetLevel, source)
-            if S.running and level >= S.targetLevel then
-                closeFarm()
-                setStatus("GOAL REACHED! Stopped at level " .. tostring(level))
+        task.wait(.12)
+        local ch,hum,rootPart=body(LP)
+        if S.attach then
+            if not S.persist and observedAlive and not ch then
+                setAttach(false)
+                note("Attach stopped on death; enable 'Continue after death' to persist")
+            else
+                local other=target()
+                local tCh,tHum,tRoot=body(other)
+                if not other then S.attachStatus="Waiting for selected player"
+                elseif not ch then S.attachStatus="Waiting for your respawn"
+                elseif not tCh then S.attachStatus="Waiting for target respawn"
+                else
+                    local wanted=tRoot.CFrame*CFrame.new(0,.15,S.distance)
+                    if (rootPart.Position-wanted.Position).Magnitude>.6 then
+                        pcall(function()
+                            rootPart.AssemblyLinearVelocity=Vector3.zero
+                            rootPart.CFrame=CFrame.lookAt(wanted.Position,tRoot.Position)
+                        end)
+                    end
+                    S.attachStatus="Following @"..other.Name
+                end
             end
-        else
-            S.progressKnown = false
-            levelLabel.Text = "Level: UNKNOWN | automatic goal-stop not available"
         end
-        settingsLabel.Text = string.format("Profile: %s | Role: %s | Goal: %d", S.profile, S.role, S.targetLevel)
-        statusLabel.Text = (S.running and "● RUNNING" or "○ STOPPED") .. "   |   Punches: " .. S.punchCount
-            .. "\n" .. S.status
-        hostButton.BackgroundColor3 = S.role == "HOST" and C.violet or C.panel
-        tankButton.BackgroundColor3 = S.role == "TANK" and C.violet or C.panel
-        profileA.BackgroundColor3 = S.profile == "FLASH" and Color3.fromRGB(55,90,171) or C.panel
-        profileB.BackgroundColor3 = S.profile == "KAELLA" and Color3.fromRGB(55,90,171) or C.panel
-        task.wait(.8)
+        observedAlive=(ch~=nil)
     end
 end)
 
-setStatus("Loaded; choose HOST/TANK and partner username. Never run on strangers.")
+task.spawn(function()
+    local sequence=1
+    while not S.closed do
+        task.wait(.05)
+        if S.punch then
+            local other=target()
+            local c,h,r=body(LP)
+            local tc,th,tr=body(other)
+            if not other then S.punchStatus="Waiting for selected player"
+            elseif not c then S.punchStatus="Waiting for your respawn"
+            elseif not tc then S.punchStatus="Waiting for target respawn"
+            elseif tc:FindFirstChildOfClass("ForceField") then
+                S.punchStatus="Waiting for spawn protection"
+            elseif (r.Position-tr.Position).Magnitude>9 then
+                S.punchStatus="Out of range: move closer or enable Attach"
+            else
+                local now=os.clock()
+                if now>=S.nextPunch then
+                    local remote=punchRemote()
+                    if not remote then
+                        setPunch(false)
+                        note("Archived Punch remote unavailable")
+                    else
+                        S.nextPunch=now+S.punchInterval
+                        local fired,err=pcall(function()
+                            remote:FireServer(0,0.18,sequence)
+                        end)
+                        if fired then
+                            S.punches=S.punches+1
+                            S.punchStatus="Attempt sent; server validates hits"
+                            sequence=sequence%5+1
+                        else
+                            S.punchStatus="Punch error: "..tostring(err):sub(1,60)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+task.spawn(function()
+    while not S.closed do
+        local _,h=body(LP)
+        if h then
+            hpDisplay.Text=string.format("♥ Health: %d/%d",
+                math.floor(h.Health),math.floor(h.MaxHealth))
+        else hpDisplay.Text="♥ Health: respawning" end
+        attachStatus.Text="Status: "..S.attachStatus
+        punchStatus.Text="Punch calls: "..S.punches.."  •  "..S.punchStatus
+        footerText.Text=string.format("◆ BelleState Hub   |   Attach: %s   |   Punch: %s",
+            S.attach and "ON" or "OFF",S.punch and "ON" or "OFF")
+        footerStatus.Text=S.status
+        task.wait(.35)
+    end
+end)
+note("BelleState v2 loaded. Select a player, then enable Attach / Punch.")
