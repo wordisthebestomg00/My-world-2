@@ -28,6 +28,7 @@ local S = {
     punchInterval = 0.10, rapid = true, punches = 0, nextPunch = 0,
     attackMode = "AUTO", burstSize = 100, burstRemaining = 0, burstRunning = false,
     visualUntil = 0, visualSide = 1, effectiveHits = "unknown",
+    observedDamage = 0, lastTargetHumanoid=nil, lastTargetHealth=nil,
     status = "Select a consenting player to start",
     attachStatus = "OFF", punchStatus = "OFF",
     compact = false, page = "Farming", minimized = false,
@@ -340,6 +341,7 @@ end)
 local function choosePlayer(plr)
     if not plr or plr==LP then return end
     S.targetId=plr.UserId;S.targetName=plr.Name
+    S.lastTargetHumanoid=nil;S.lastTargetHealth=nil;S.observedDamage=0
     playerButton.Text=plr.DisplayName.."  ▾"
     note("Target selected: @"..plr.Name)
     overlay.Visible=false
@@ -436,7 +438,7 @@ end)
 rapidButton.Activated:Connect(function()
     setPunchInterval(S.rapid and 0.30 or 0.10,not S.rapid)
 end)
-local modes={"AUTO","TOOL","REMOTE"}
+local modes={"AUTO","TOOL","INPUT","REMOTE"}
 attackModeBtn.Activated:Connect(function()
     local i=table.find(modes,S.attackMode) or 1
     S.attackMode=modes[(i%#modes)+1]
@@ -488,22 +490,42 @@ local function activePunchTool()
 end
 
 local function tryAttack(sequence)
-    -- AUTO prioritizes an actually equipped Tool, which may run its legitimate
-    -- local animation and input logic. REMOTE is archived, game-version dependent.
-    local tool=(S.attackMode~="REMOTE") and activePunchTool() or nil
+    -- AUTO tries legitimate equipped Fists Tool, then executor input if present,
+    -- before falling back to the archived Events.Punch remote.
+    -- Server-side cooldowns and damage checks are never overridden.
+    local tool=(S.attackMode=="AUTO" or S.attackMode=="TOOL") and activePunchTool() or nil
     if tool then
         local ok,err=pcall(function() tool:Activate() end)
         if ok then return true,"Tool:Activate" end
         if S.attackMode=="TOOL" then return false,tostring(err) end
     elseif S.attackMode=="TOOL" then
-        return false,"Equip a punch Tool first"
+        return false,"Equip an attack/Fists Tool"
+    end
+    if S.attackMode=="AUTO" or S.attackMode=="INPUT" then
+        local clicker=(type(mouse1click)=="function" and mouse1click)
+            or (type(env.mouse1click)=="function" and env.mouse1click)
+        if clicker then
+            local ok,err=pcall(clicker)
+            if ok then return true,"Executor input" end
+            if S.attackMode=="INPUT" then return false,tostring(err) end
+        else
+            local press=(type(mouse1press)=="function" and mouse1press)
+                or (type(env.mouse1press)=="function" and env.mouse1press)
+            local release=(type(mouse1release)=="function" and mouse1release)
+                or (type(env.mouse1release)=="function" and env.mouse1release)
+            if press and release then
+                local ok,err=pcall(function() press();task.wait(.03);release() end)
+                if ok then return true,"Executor input" end
+                if S.attackMode=="INPUT" then return false,tostring(err) end
+            end
+        end
+        if S.attackMode=="INPUT" then return false,"Executor has no supported click simulation" end
     end
     local remote=punchRemote()
     if not remote then return false,"Punch RemoteEvent missing" end
     local ok,err=pcall(function() remote:FireServer(0,0.18,sequence) end)
     return ok,ok and "Archived remote" or tostring(err)
 end
-
 
 -- Client-side beta modules. These are not claims of game-specific authority.
 local function getMyRoot()
@@ -1068,7 +1090,23 @@ task.spawn(function()
                 math.floor(h.Health),math.floor(h.MaxHealth))
         else hpDisplay.Text="♥ Health: respawning" end
         attachStatus.Text="Status: "..S.attachStatus
-        punchStatus.Text="Attempts: "..S.punches.."  •  "..(S.burstRunning and (S.burstRemaining.." left") or S.punchStatus)
+        punchStatus.Text=string.format("Attempts: %d | HP loss seen: %.0f%s", S.punches, S.observedDamage, S.burstRunning and (" | "..S.burstRemaining.." left") or "")
+        local other=target()
+        local _,th=body(other)
+        if th then
+            if th~=S.lastTargetHumanoid then
+                S.lastTargetHumanoid=th
+                S.lastTargetHealth=th.Health
+            elseif S.lastTargetHealth and th.Health<S.lastTargetHealth then
+                S.observedDamage=S.observedDamage+(S.lastTargetHealth-th.Health)
+                S.lastTargetHealth=th.Health
+            else
+                S.lastTargetHealth=th.Health
+            end
+        else
+            S.lastTargetHumanoid=nil
+            S.lastTargetHealth=nil
+        end
         footerText.Text=string.format("◆ BelleState Hub   |   Attach: %s   |   Punch: %s",
             S.attach and "ON" or "OFF",S.punch and "ON" or "OFF")
         footerStatus.Text=S.status
