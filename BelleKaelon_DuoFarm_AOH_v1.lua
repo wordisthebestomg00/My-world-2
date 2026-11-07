@@ -30,6 +30,10 @@ local S = {
     status = "Select a consenting player to start",
     attachStatus = "OFF", punchStatus = "OFF",
     compact = false, page = "Farming", minimized = false,
+    antiGrab=false, multiGrab=false, infiniteGrab=false, held={},
+    slots={},lastPosition=nil, autoEscape=false,healthThreshold=.20,lastEscape=0,
+    aura=false, flight=false, speedBurst=false, highlight=nil,
+    flightMover=nil, speedHum=nil, speedBaseline=nil,
 }
 env.BelleStateUtilityHub = S
 
@@ -224,11 +228,16 @@ local function toggle(parent,y,onColor)
 end
 
 local telekinesis=card("Telekinesis","Telekinesis",
-    "Control, hold and manipulate objects with your mind.",C.purple,"✦",1,"SOON")
-row(telekinesis,"Anti Grab",91,C.muted)
-row(telekinesis,"Multi Grab",129,C.muted)
-row(telekinesis,"Infinite Grab",167,C.muted)
-text(telekinesis,"Planned module",160,196,100,18,9,C.muted,false)
+    "Local physics props • client authority dependent.",C.purple,"✦",1,"BETA")
+text(telekinesis,"Anti Grab (self)",13,88,173,25,11,C.text,false)
+local antiGrabBtn,renderAnti=toggle(telekinesis,88,C.purple)
+text(telekinesis,"Multi Grab (up to 3 props)",13,122,173,25,10,C.text,false)
+local multiGrabBtn,renderMulti=toggle(telekinesis,122,C.purple)
+text(telekinesis,"Infinite Hold",13,156,173,25,11,C.text,false)
+local infiniteGrabBtn,renderInfinite=toggle(telekinesis,156,C.purple)
+local grabBtn=button(telekinesis,"GRAB PROPS",12,195,116,29,C.navy,C.purple)
+local dropBtn=button(telekinesis,"RELEASE",140,195,118,29,C.navy,C.purple)
+local tkStatus=text(telekinesis,"Local props only • 0 held",13,234,240,20,10,C.muted,false)
 
 local attachCard=card("Farming","Attach System",
     "Persistent target following across character respawns.",C.green,"↗",2,"READY")
@@ -241,11 +250,19 @@ local attachStatus=text(attachCard,"Status: OFF",13,196,245,23,10,C.muted,false)
 renderPersist(true)
 
 local teleportCard=card("Teleport","Teleport",
-    "Waypoints and travel tools for your own world.",C.blue,"◎",3,"SOON")
-row(teleportCard,"Safe Zone",91,C.muted)
-row(teleportCard,"Quest Area",129,C.muted)
-row(teleportCard,"Training Area",167,C.muted)
-text(teleportCard,"Planned module",160,196,100,18,9,C.muted,false)
+    "Save locations first • client travel may be corrected.",C.blue,"◎",3,"BETA")
+local slotButtons={}
+for i,slot in ipairs({"Safe Zone","Quest Area","Boss Spawn","Training Area"}) do
+    local y=83+(i-1)*35
+    text(teleportCard,slot,12,y,133,25,10,C.text,false)
+    local save=button(teleportCard,"SAVE",0,y,43,27,C.navy,C.blue)
+    save.Position=UDim2.new(1,-102,0,y)
+    local go=button(teleportCard,"GO",0,y,43,27,C.blue,C.blue)
+    go.Position=UDim2.new(1,-52,0,y)
+    table.insert(slotButtons,{name=slot,save=save,go=go})
+end
+local returnBtn=button(teleportCard,"RETURN TO PREVIOUS",12,224,246,30,C.navy,C.blue)
+returnBtn.Size=UDim2.new(1,-24,0,30)
 
 local combatCard=card("Combat","Combat",
     "Tool activation, bounded bursts and archived remote fallback.",C.red,"✊",4,"READY")
@@ -263,18 +280,26 @@ local burstGo=button(combatCard,"RUN BURST",126,193,132,26,C.red,C.red)
 local punchStatus=text(combatCard,"Attempts: 0",13,234,245,22,10,C.muted,false)
 
 local safetyCard=card("Safety","Safety",
-    "Health monitoring and defensive presets.",C.gold,"⬡",5,"SOON")
-row(safetyCard,"Emergency Escape",91,C.muted)
-row(safetyCard,"Safe Return",129,C.muted)
-row(safetyCard,"Health Threshold",167,C.muted)
-text(safetyCard,"Planned module",160,196,100,18,9,C.muted,false)
+    "Auto-return to your saved Safe Zone at low health.",C.gold,"⬡",5,"BETA")
+text(safetyCard,"Emergency Escape",13,88,170,25,11,C.text,false)
+local escapeBtn,renderEscape=toggle(safetyCard,88,C.gold)
+text(safetyCard,"Health Threshold",13,132,112,25,10,C.text,false)
+local hpMinus=button(safetyCard,"−",129,129,30,27,C.navy,C.gold)
+local hpThreshold=text(safetyCard,"20%",165,134,45,20,11,C.gold,true)
+local hpPlus=button(safetyCard,"+",215,129,30,27,C.navy,C.gold)
+local safetyReturn=button(safetyCard,"SAFE RETURN NOW",12,179,246,30,C.navy,C.gold)
+safetyReturn.Size=UDim2.new(1,-24,0,30)
+local safetyStatus=text(safetyCard,"Save a Safe Zone in Teleport first.",13,233,245,22,10,C.muted,false)
 
 local allCard=card("All","All Abilities",
-    "Master controls for the full BelleState build.",C.purple,"◆",6,"SOON")
-row(allCard,"Aura Sense",91,C.muted)
-row(allCard,"Flight Assist",129,C.muted)
-row(allCard,"Speed Burst",167,C.muted)
-text(allCard,"Planned module",160,196,100,18,9,C.muted,false)
+    "Client-only aura, hover and speed movement.",C.purple,"◆",6,"BETA")
+text(allCard,"Aura Sense (target highlight)",13,88,171,25,10,C.text,false)
+local auraBtn,renderAura=toggle(allCard,88,C.purple)
+text(allCard,"Flight Assist (self hover)",13,126,172,25,10,C.text,false)
+local flightBtn,renderFlight=toggle(allCard,126,C.purple)
+text(allCard,"Speed Burst (self movement)",13,164,172,25,10,C.text,false)
+local speedBtn,renderSpeed=toggle(allCard,164,C.purple)
+local abilityStatus=text(allCard,"Client effects • server may override.",13,234,242,22,10,C.muted,false)
 
 local pages={
     {"✦","Telekinesis"},{"♧","Farming"},{"◎","Teleport"},
@@ -370,8 +395,8 @@ local function setPunch(enabled)
             note("Choose a consenting training partner first")
             S.punch=false;refreshButtons();return
         end
-        if not punchRemote() then
-            note("Punch RemoteEvent missing; old Age of Heroes API may have changed")
+        if S.attackMode=="REMOTE" and not punchRemote() then
+            note("Archived Punch remote missing. Try AUTO with equipped Fists Tool.")
             S.punch=false;refreshButtons();return
         end
         S.punch=true
@@ -379,6 +404,8 @@ local function setPunch(enabled)
         note("Rapid punch enabled at "..string.format("%.2f",S.punchInterval).."s; server cooldowns still apply")
     else
         S.punch=false;S.punchStatus="OFF"
+        S.burstRunning=false;S.burstRemaining=0
+        burstGo.Text="RUN BURST"
         note("Infinite Punch stopped")
     end
     refreshButtons()
@@ -448,7 +475,11 @@ local function activePunchTool()
     local ch=LP.Character
     if not ch then return nil end
     for _,tool in ipairs(ch:GetChildren()) do
-        if tool:IsA("Tool") and tool.Enabled then
+        local name=tool.Name:lower()
+        if tool:IsA("Tool") and tool.Enabled and
+           (name:find("punch") or name:find("fist") or
+            name:find("hand") or name:find("combat") or
+            name:find("melee") or name:find("attack")) then
             return tool
         end
     end
@@ -471,6 +502,257 @@ local function tryAttack(sequence)
     local ok,err=pcall(function() remote:FireServer(0,0.18,sequence) end)
     return ok,ok and "Archived remote" or tostring(err)
 end
+
+
+-- Client-side beta modules. These are not claims of game-specific authority.
+local function getMyRoot()
+    local ch,h,r=body(LP)
+    return ch,h,r
+end
+local function saveSlot(name)
+    local ch,h,r=getMyRoot()
+    if not r then note("Cannot save while respawning"); return end
+    S.slots[name]=r.CFrame
+    note("Saved "..name.." at your present location")
+end
+local function travelTo(cf,label)
+    if typeof(cf)~="CFrame" then note("Location not saved yet");return false end
+    local ch,h,r=getMyRoot()
+    if not r then note("Cannot travel while respawning");return false end
+    S.lastPosition=r.CFrame
+    local ok=pcall(function()
+        r.AssemblyLinearVelocity=Vector3.zero
+        r.CFrame=cf
+    end)
+    if ok then note("Travel requested: "..(label or "waypoint").."; server may correct position") end
+    return ok
+end
+for _,item in ipairs(slotButtons) do
+    item.save.Activated:Connect(function() saveSlot(item.name) end)
+    item.go.Activated:Connect(function()
+        travelTo(S.slots[item.name],item.name)
+    end)
+end
+returnBtn.Activated:Connect(function()
+    travelTo(S.lastPosition,"previous position")
+end)
+escapeBtn.Activated:Connect(function()
+    S.autoEscape=not S.autoEscape
+    renderEscape(S.autoEscape)
+    safetyStatus.Text=S.autoEscape and "Auto escape armed" or "Auto escape OFF"
+    if S.autoEscape and not S.slots["Safe Zone"] then
+        note("Set Safe Zone in Teleport before enabling emergency escape")
+    end
+end)
+hpMinus.Activated:Connect(function()
+    S.healthThreshold=math.max(.10,S.healthThreshold-.05)
+    hpThreshold.Text=math.floor(S.healthThreshold*100+.5).."%"
+end)
+hpPlus.Activated:Connect(function()
+    S.healthThreshold=math.min(.80,S.healthThreshold+.05)
+    hpThreshold.Text=math.floor(S.healthThreshold*100+.5).."%"
+end)
+safetyReturn.Activated:Connect(function()
+    travelTo(S.slots["Safe Zone"],"Safe Zone")
+end)
+
+local function clearHeld()
+    for _,record in ipairs(S.held) do
+        for _,inst in ipairs(record.instances) do
+            pcall(function() inst:Destroy() end)
+        end
+    end
+    table.clear(S.held)
+    if tkStatus then tkStatus.Text="Released locally held props" end
+end
+local function eligibleProp(part,ch)
+    if not part or not part:IsA("BasePart") or part.Anchored or part.Locked then return false end
+    if part:IsDescendantOf(ch) then return false end
+    local m=part:FindFirstAncestorOfClass("Model")
+    if m and (m:FindFirstChildOfClass("Humanoid")
+        or Players:GetPlayerFromCharacter(m)) then return false end
+    if part.AssemblyMass>550 then return false end
+    for _,record in ipairs(S.held) do
+        if record.part==part then return false end
+    end
+    return true
+end
+local function grabNearby()
+    local ch,h,r=getMyRoot()
+    if not r then note("Wait for respawn before grabbing");return end
+    if not S.multiGrab then clearHeld() end
+    local desired=S.multiGrab and 3 or 1
+    local count=0
+    local ok,parts=pcall(function() return workspace:GetPartBoundsInRadius(r.Position,32) end)
+    if not ok then note("Nearby prop query unavailable");return end
+    table.sort(parts,function(a,b)
+        return (a.Position-r.Position).Magnitude<(b.Position-r.Position).Magnitude
+    end)
+    for _,part in ipairs(parts) do
+        if #S.held>=desired then break end
+        if eligibleProp(part,ch) then
+            local num=#S.held+1
+            local ok2=pcall(function()
+                local a=Instance.new("Attachment")
+                a.Name="BelleState_PropHold"
+                a.Parent=part
+                local b=Instance.new("Attachment")
+                b.Name="BelleState_RootTarget"
+                b.Position=Vector3.new((num-2)*3.5,1.5,-6)
+                b.Parent=r
+                local ap=Instance.new("AlignPosition")
+                ap.Name="BelleState_LocalTK"
+                ap.Attachment0=a
+                ap.Attachment1=b
+                ap.MaxForce=300000
+                ap.Responsiveness=35
+                ap.RigidityEnabled=false
+                ap.Parent=part
+                table.insert(S.held,{part=part,instances={ap,a,b}})
+            end)
+            if ok2 then count=count+1 end
+        end
+    end
+    tkStatus.Text="Local props held: "..#S.held.." (replication unverified)"
+    note("Attempted grab of "..count.." nearby props; depends on physics ownership")
+    if count>0 and not S.infiniteGrab then
+        task.delay(5,function()
+            if not S.closed and not S.infiniteGrab then clearHeld() end
+        end)
+    end
+end
+antiGrabBtn.Activated:Connect(function()
+    S.antiGrab=not S.antiGrab
+    renderAnti(S.antiGrab)
+    note("Best-effort self anti-grab "..(S.antiGrab and "ON" or "OFF"))
+end)
+multiGrabBtn.Activated:Connect(function()
+    S.multiGrab=not S.multiGrab
+    renderMulti(S.multiGrab)
+    if not S.multiGrab and #S.held>1 then clearHeld() end
+end)
+infiniteGrabBtn.Activated:Connect(function()
+    S.infiniteGrab=not S.infiniteGrab
+    renderInfinite(S.infiniteGrab)
+    if not S.infiniteGrab then clearHeld() end
+end)
+grabBtn.Activated:Connect(grabNearby)
+dropBtn.Activated:Connect(clearHeld)
+
+local function removeHighlight()
+    if S.highlight then pcall(function() S.highlight:Destroy() end) end
+    S.highlight=nil
+end
+auraBtn.Activated:Connect(function()
+    S.aura=not S.aura
+    renderAura(S.aura)
+    if not S.aura then removeHighlight() end
+    note("Aura Sense "..(S.aura and "ON" or "OFF").." (visual only)")
+end)
+flightBtn.Activated:Connect(function()
+    S.flight=not S.flight
+    renderFlight(S.flight)
+    if not S.flight and S.flightMover then
+        pcall(function() S.flightMover:Destroy() end)
+        S.flightMover=nil
+    end
+    note("Flight Assist "..(S.flight and "ON" or "OFF").." (local hover)")
+end)
+speedBtn.Activated:Connect(function()
+    S.speedBurst=not S.speedBurst
+    renderSpeed(S.speedBurst)
+    if not S.speedBurst and S.speedHum then
+        pcall(function()
+            if S.speedHum.Parent and S.speedBaseline then
+                S.speedHum.WalkSpeed=S.speedBaseline
+            end
+        end)
+    end
+    note("Speed Burst "..(S.speedBurst and "ON" or "OFF").." (server may override)")
+end)
+
+task.spawn(function()
+    local antiTick=0
+    while not S.closed do
+        task.wait(.18)
+        local ch,h,r=getMyRoot()
+        if h and r then
+            if S.autoEscape and h.MaxHealth>0 and
+                h.Health/h.MaxHealth<=S.healthThreshold and
+                os.clock()-S.lastEscape>=5 and
+                S.slots["Safe Zone"] then
+                S.lastEscape=os.clock()
+                travelTo(S.slots["Safe Zone"],"Low-health escape")
+                safetyStatus.Text="Emergency return attempted"
+            end
+            if S.antiGrab and os.clock()-antiTick>=.5 then
+                antiTick=os.clock()
+                -- Only target obvious grab constraints on your own rig.
+                for _,obj in ipairs(ch:GetDescendants()) do
+                    if (obj:IsA("AlignPosition") or obj:IsA("BodyPosition")
+                        or obj:IsA("WeldConstraint")) and
+                        obj.Name:lower():find("grab") and
+                        not obj.Name:find("BelleState_") then
+                        pcall(function() obj:Destroy() end)
+                    end
+                end
+                if h.PlatformStand then
+                    pcall(function() h.PlatformStand=false end)
+                end
+            end
+            if S.speedBurst then
+                if S.speedHum~=h then
+                    S.speedHum=h
+                    S.speedBaseline=h.WalkSpeed
+                end
+                if h.WalkSpeed<32 then
+                    pcall(function() h.WalkSpeed=32 end)
+                end
+            end
+            if S.flight then
+                if not S.flightMover or S.flightMover.Parent~=r then
+                    if S.flightMover then pcall(function() S.flightMover:Destroy() end) end
+                    local bv=Instance.new("BodyVelocity")
+                    bv.Name="BelleState_LocalHover"
+                    bv.MaxForce=Vector3.new(1e5,1e5,1e5)
+                    bv.P=1800
+                    bv.Parent=r
+                    S.flightMover=bv
+                end
+                S.flightMover.Velocity=h.MoveDirection*38
+            end
+        elseif S.flightMover then
+            pcall(function() S.flightMover:Destroy() end)
+            S.flightMover=nil
+        end
+        if S.aura then
+            local p=target()
+            if p and p.Character then
+                if not S.highlight or S.highlight.Adornee~=p.Character then
+                    removeHighlight()
+                    local hi=Instance.new("Highlight")
+                    hi.Name="BelleState_Aura"
+                    hi.FillColor=C.purple
+                    hi.OutlineColor=C.blue
+                    hi.FillTransparency=.65
+                    hi.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop
+                    hi.Adornee=p.Character
+                    hi.Parent=gui
+                    S.highlight=hi
+                end
+            else
+                removeHighlight()
+            end
+        end
+        if #S.held>0 then
+            local missing=false
+            for _,v in ipairs(S.held) do
+                if not v.part.Parent then missing=true;break end
+            end
+            if missing then clearHeld() end
+        end
+    end
+end)
 
 local float=button(gui,"◆",18,118,52,52,C.panel,C.purple)
 float.TextSize=23
@@ -645,6 +927,12 @@ end)
 function S.Shutdown()
     if S.closed then return end
     S.attach=false;S.punch=false;S.closed=true
+    clearHeld()
+    removeHighlight()
+    if S.flightMover then pcall(function() S.flightMover:Destroy() end) end
+    if S.speedHum and S.speedBaseline then
+        pcall(function() if S.speedHum.Parent then S.speedHum.WalkSpeed=S.speedBaseline end end)
+    end
     pcall(function() gui:Destroy() end)
     if env.BelleStateUtilityHub==S then env.BelleStateUtilityHub=nil end
 end
@@ -779,4 +1067,4 @@ task.spawn(function()
         task.wait(.35)
     end
 end)
-note("BelleState v2 loaded. Select a player, then enable Attach / Punch.")
+note("BelleState v3 loaded. Mobile UI, punch bursts, teleport slots, safety and local abilities are available.")
