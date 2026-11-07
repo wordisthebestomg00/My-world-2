@@ -1,4 +1,4 @@
--- BelleState Utility Hub | BelleKaelonR v2.1 — Rapid Punch
+-- BelleState Utility Hub | BelleKaelonR v3 — burst punches and ability controls
 -- Experimental Age of Heroes client UI.
 -- Only two controls are implemented: persistent attach to a selected partner,
 -- and a continuous punch loop. All other cards are visual placeholders.
@@ -25,6 +25,8 @@ local S = {
     closed = false, attach = false, punch = false, persist = true,
     targetId = nil, targetName = nil, distance = 3.4,
     punchInterval = 0.10, rapid = true, punches = 0, nextPunch = 0,
+    attackMode = "AUTO", burstSize = 100, burstRemaining = 0, burstRunning = false,
+    visualUntil = 0, visualSide = 1, effectiveHits = "unknown",
     status = "Select a consenting player to start",
     attachStatus = "OFF", punchStatus = "OFF",
     compact = false, page = "Farming", minimized = false,
@@ -184,7 +186,7 @@ local cards={}
 local function card(key,title,desc,color,icon,order,tag)
     local f=make("Frame",{
         Name=key,BackgroundColor3=C.panel,BorderSizePixel=0,
-        LayoutOrder=order,Size=UDim2.fromOffset(270,225)
+        LayoutOrder=order,Size=UDim2.fromOffset(270,260)
     },content)
     round(f,13);edge(f,color,1.5,.12)
     make("UIGradient",{
@@ -246,7 +248,7 @@ row(teleportCard,"Training Area",167,C.muted)
 text(teleportCard,"Planned module",160,196,100,18,9,C.muted,false)
 
 local combatCard=card("Combat","Combat",
-    "Continuous punch attempts at a selected partner.",C.red,"✊",4,"READY")
+    "Tool activation, bounded bursts and archived remote fallback.",C.red,"✊",4,"READY")
 text(combatCard,"Infinite Punch",13,91,178,23,12,C.text,false)
 local punchToggle,renderPunch=toggle(combatCard,87,C.red)
 text(combatCard,"Punch Interval",13,127,113,22,11,C.muted,false)
@@ -254,9 +256,11 @@ local minus=button(combatCard,"−",126,124,31,26,C.navy,C.red)
 local intervalLabel=text(combatCard,"0.10s",162,127,51,20,11,C.text,true)
 intervalLabel.TextXAlignment=Enum.TextXAlignment.Center
 local plus=button(combatCard,"+",220,124,31,26,C.navy,C.red)
-local rapidButton=button(combatCard,"Rapid: ON",13,158,110,26,C.red,C.red)
-text(combatCard,"Server validates hits",130,161,127,22,10,C.muted,false)
-local punchStatus=text(combatCard,"Punches sent: 0",13,195,245,23,10,C.muted,false)
+local rapidButton=button(combatCard,"Rapid: ON",13,157,109,26,C.red,C.red)
+local attackModeBtn=button(combatCard,"Mode: AUTO",130,157,128,26,C.navy,C.red)
+local burstChoice=button(combatCard,"100 punches",13,193,105,26,C.navy,C.red)
+local burstGo=button(combatCard,"RUN BURST",126,193,132,26,C.red,C.red)
+local punchStatus=text(combatCard,"Attempts: 0",13,234,245,22,10,C.muted,false)
 
 local safetyCard=card("Safety","Safety",
     "Health monitoring and defensive presets.",C.gold,"⬡",5,"SOON")
@@ -404,6 +408,69 @@ end)
 rapidButton.Activated:Connect(function()
     setPunchInterval(S.rapid and 0.30 or 0.10,not S.rapid)
 end)
+local modes={"AUTO","TOOL","REMOTE"}
+attackModeBtn.Activated:Connect(function()
+    local i=table.find(modes,S.attackMode) or 1
+    S.attackMode=modes[(i%#modes)+1]
+    attackModeBtn.Text="Mode: "..S.attackMode
+    note("Attack mode: "..S.attackMode.." (no guaranteed damage)")
+end)
+local sizes={100,250,500,1000}
+burstChoice.Activated:Connect(function()
+    local i=table.find(sizes,S.burstSize) or 1
+    S.burstSize=sizes[(i%#sizes)+1]
+    burstChoice.Text=tostring(S.burstSize).." punches"
+end)
+burstGo.Activated:Connect(function()
+    if S.burstRunning then
+        S.burstRunning=false
+        S.burstRemaining=0
+        setPunch(false)
+        burstGo.Text="RUN BURST"
+        note("Burst cancelled")
+        return
+    end
+    -- A burst is a count of attempts, not 100-1000 punches per second.
+    S.burstRunning=true
+    S.burstRemaining=S.burstSize
+    S.nextPunch=0
+    setPunch(true)
+    if not S.punch then
+        S.burstRunning=false
+        S.burstRemaining=0
+    else
+        burstGo.Text="STOP BURST"
+        note("Starting "..S.burstSize.." punch attempts at "..string.format("%.2f",S.punchInterval).." sec intervals")
+    end
+end)
+
+local function activePunchTool()
+    local ch=LP.Character
+    if not ch then return nil end
+    for _,tool in ipairs(ch:GetChildren()) do
+        if tool:IsA("Tool") and tool.Enabled then
+            return tool
+        end
+    end
+    return nil
+end
+
+local function tryAttack(sequence)
+    -- AUTO prioritizes an actually equipped Tool, which may run its legitimate
+    -- local animation and input logic. REMOTE is archived, game-version dependent.
+    local tool=(S.attackMode~="REMOTE") and activePunchTool() or nil
+    if tool then
+        local ok,err=pcall(function() tool:Activate() end)
+        if ok then return true,"Tool:Activate" end
+        if S.attackMode=="TOOL" then return false,tostring(err) end
+    elseif S.attackMode=="TOOL" then
+        return false,"Equip a punch Tool first"
+    end
+    local remote=punchRemote()
+    if not remote then return false,"Punch RemoteEvent missing" end
+    local ok,err=pcall(function() remote:FireServer(0,0.18,sequence) end)
+    return ok,ok and "Archived remote" or tostring(err)
+end
 
 local float=button(gui,"◆",18,118,52,52,C.panel,C.purple)
 float.TextSize=23
@@ -456,7 +523,7 @@ local function redraw()
     footer.Size=UDim2.fromOffset(width-20,32)
     local cols=mobile and 1 or 3
     local cardW=math.max(180,math.floor((cw-20-(cols-1)*10)/cols))
-    layout.CellSize=UDim2.fromOffset(cardW,mobile and 229 or 225)
+    layout.CellSize=UDim2.fromOffset(cardW,mobile and 264 or 260)
     layout.CellPadding=UDim2.fromOffset(10,10)
     for _,record in pairs(cards) do
         local f=record.frame
@@ -617,41 +684,82 @@ end)
 task.spawn(function()
     local sequence=1
     while not S.closed do
-        -- Fine-grained polling avoids an artificial 50ms wait between rapid attacks.
         task.wait(.02)
         if S.punch then
             local other=target()
             local c,h,r=body(LP)
             local tc,th,tr=body(other)
-            if not other then S.punchStatus="Waiting for selected player"
+            if not other then S.punchStatus="Waiting for target"
             elseif not c then S.punchStatus="Waiting for your respawn"
             elseif not tc then S.punchStatus="Waiting for target respawn"
             elseif tc:FindFirstChildOfClass("ForceField") then
                 S.punchStatus="Waiting for spawn protection"
-            elseif (r.Position-tr.Position).Magnitude>9 then
-                S.punchStatus="Out of range: move closer or enable Attach"
-            else
-                local now=os.clock()
-                if now>=S.nextPunch then
-                    local remote=punchRemote()
-                    if not remote then
-                        setPunch(false)
-                        note("Archived Punch remote unavailable")
-                    else
-                        S.nextPunch=now+S.punchInterval
-                        local fired,err=pcall(function()
-                            remote:FireServer(0,0.18,sequence)
-                        end)
-                        if fired then
-                            S.punches=S.punches+1
-                            S.punchStatus="Attempt sent; server validates hits"
-                            sequence=sequence%5+1
-                        else
-                            S.punchStatus="Punch error: "..tostring(err):sub(1,60)
+            elseif (r.Position-tr.Position).Magnitude>10 then
+                S.punchStatus="Out of range; enable Attach or move closer"
+            elseif os.clock()>=S.nextPunch then
+                S.nextPunch=os.clock()+S.punchInterval
+                local fired,method=tryAttack(sequence)
+                if fired then
+                    S.punches=S.punches+1
+                    sequence=sequence%5+1
+                    S.visualUntil=os.clock()+0.09
+                    S.visualSide=-S.visualSide
+                    S.punchStatus="Attempt via "..method.."; damage unverified"
+                    if S.burstRunning then
+                        S.burstRemaining=S.burstRemaining-1
+                        if S.burstRemaining<=0 then
+                            S.burstRunning=false
+                            S.punch=false
+                            burstGo.Text="RUN BURST"
+                            refreshButtons()
+                            note("Burst finished: "..S.burstSize.." attempts. Check actual target health.")
+                        end
+                    end
+                else
+                    S.punchStatus=tostring(method)
+                    -- If TOOL mode has no Tool, pause rather than spinning indefinitely.
+                    S.nextPunch=os.clock()+.45
+                end
+            end
+        end
+    end
+end)
+
+-- Client-side pose feedback. The server decides whether any attempted
+-- punch counts; these arm movements do not change damage or cooldowns.
+task.spawn(function()
+    local cachedCharacter=nil
+    local leftArm,rightArm
+    while not S.closed do
+        task.wait(.03)
+        local ch=LP.Character
+        if ch~=cachedCharacter then
+            cachedCharacter=ch
+            leftArm,rightArm=nil,nil
+            if ch then
+                for _,joint in ipairs(ch:GetDescendants()) do
+                    if joint:IsA("Motor6D") then
+                        if joint.Name=="LeftShoulder" or joint.Name=="Left Shoulder" then
+                            leftArm=joint
+                        elseif joint.Name=="RightShoulder" or joint.Name=="Right Shoulder" then
+                            rightArm=joint
                         end
                     end
                 end
             end
+        end
+        local on=(S.punch and os.clock()<S.visualUntil)
+        if leftArm then
+            pcall(function()
+                leftArm.Transform=on and S.visualSide<0
+                    and CFrame.Angles(-1.0,0,-0.35) or CFrame.new()
+            end)
+        end
+        if rightArm then
+            pcall(function()
+                rightArm.Transform=on and S.visualSide>0
+                    and CFrame.Angles(-1.0,0,0.35) or CFrame.new()
+            end)
         end
     end
 end)
@@ -664,7 +772,7 @@ task.spawn(function()
                 math.floor(h.Health),math.floor(h.MaxHealth))
         else hpDisplay.Text="♥ Health: respawning" end
         attachStatus.Text="Status: "..S.attachStatus
-        punchStatus.Text="Punch calls: "..S.punches.."  •  "..S.punchStatus
+        punchStatus.Text="Attempts: "..S.punches.."  •  "..(S.burstRunning and (S.burstRemaining.." left") or S.punchStatus)
         footerText.Text=string.format("◆ BelleState Hub   |   Attach: %s   |   Punch: %s",
             S.attach and "ON" or "OFF",S.punch and "ON" or "OFF")
         footerStatus.Text=S.status
