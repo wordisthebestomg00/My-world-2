@@ -925,6 +925,7 @@ float.Activated:Connect(function()
     if not floatMoved then setMinimized(false) end
 end)
 
+local poseConnection
 function S.Shutdown()
     if S.closed then return end
     S.attach=false;S.punch=false;S.closed=true
@@ -1018,7 +1019,6 @@ end)
 -- Client-side animated punch feedback: this does not change real damage.
 -- PreSimulation is used after Animator pose evaluation; supports both classic
 -- Motor6D rigs and newer avatar AnimationConstraint rigs where available.
-local poseConnection
 local poseCharacter,poseLeft,poseRight,wasPosing
 poseConnection=RunService.PreSimulation:Connect(function()
     if S.closed then return end
