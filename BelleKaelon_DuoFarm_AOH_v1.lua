@@ -565,7 +565,8 @@ local function getAttackButton()
     for _,node in ipairs(playerGui:GetDescendants()) do
         if node:IsA("GuiButton") and node.Visible and node.AbsoluteSize.X>18
             and node.AbsoluteSize.Y>18 and not node:IsDescendantOf(gui) then
-            local identifier=(node.Name.." "..node.Text):lower()
+            local caption=node:IsA("TextButton") and node.Text or ""
+            local identifier=(node.Name.." "..caption):lower()
             if identifier:find("punch",1,true) or identifier:find("attack",1,true)
                 or identifier:find("fist",1,true) or identifier:find("fight",1,true)
                 or identifier:find("combat",1,true) or identifier:find("m1",1,true) then
