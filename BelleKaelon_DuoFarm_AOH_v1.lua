@@ -1,4 +1,4 @@
--- BelleState Utility Hub | BelleKaelonR v3 — burst punches and ability controls
+-- BelleState Utility Hub | BelleKaelonR v3.1 — co-op hold and punch diagnostics
 -- Experimental Age of Heroes client UI.
 -- Tested only by static inspection: client-side controls for attach, burst punching,
 -- saved teleports, local TK, emergency return, aura, hover and speed. Server-authoritative
@@ -33,6 +33,7 @@ local S = {
     attachStatus = "OFF", punchStatus = "OFF",
     compact = false, page = "Farming", minimized = false,
     antiGrab=false, multiGrab=false, infiniteGrab=false, held={},
+    tankHold=false,
     slots={},lastPosition=nil, autoEscape=false,healthThreshold=.20,lastEscape=0,
     aura=false, flight=false, speedBurst=false, highlight=nil,
     flightMover=nil, speedHum=nil, speedBaseline=nil,
@@ -192,7 +193,7 @@ local cards={}
 local function card(key,title,desc,color,icon,order,tag)
     local f=make("Frame",{
         Name=key,BackgroundColor3=C.panel,BorderSizePixel=0,
-        LayoutOrder=order,Size=UDim2.fromOffset(270,260)
+        LayoutOrder=order,Size=UDim2.fromOffset(270,310)
     },content)
     round(f,13);edge(f,color,1.5,.12)
     make("UIGradient",{
@@ -239,7 +240,13 @@ text(telekinesis,"Infinite Hold",13,156,173,25,11,C.text,false)
 local infiniteGrabBtn,renderInfinite=toggle(telekinesis,156,C.purple)
 local grabBtn=button(telekinesis,"GRAB PROPS",12,195,116,29,C.navy,C.purple)
 local dropBtn=button(telekinesis,"RELEASE",140,195,118,29,C.navy,C.purple)
-local tkStatus=text(telekinesis,"Local props only • 0 held",13,234,240,20,10,C.muted,false)
+text(telekinesis,"Co-op Hold (SELF to selected)",13,192,172,25,10,C.text,false)
+local tankHoldBtn,renderTankHold=toggle(telekinesis,191,C.green)
+grabBtn.Position=UDim2.fromOffset(12,230)
+dropBtn.Position=UDim2.new(1,-130,0,230)
+grabBtn.Text="GRAB PROPS"
+dropBtn.Text="RELEASE"
+local tkStatus=text(telekinesis,"Co-op hold uses your own avatar.",13,271,241,22,10,C.muted,false)
 
 local attachCard=card("Farming","Attach System",
     "Persistent target following across character respawns.",C.green,"↗",2,"READY")
@@ -280,6 +287,8 @@ local attackModeBtn=button(combatCard,"Mode: AUTO",130,157,128,26,C.navy,C.red)
 local burstChoice=button(combatCard,"100 punches",13,193,105,26,C.navy,C.red)
 local burstGo=button(combatCard,"RUN BURST",126,193,132,26,C.red,C.red)
 local punchStatus=text(combatCard,"Attempts: 0",13,234,245,22,10,C.muted,false)
+local diagnosticBtn=button(combatCard,"CHECK PUNCH SETUP",13,271,244,28,C.navy,C.red)
+diagnosticBtn.Size=UDim2.new(1,-26,0,28)
 
 local safetyCard=card("Safety","Safety",
     "Auto-return to your saved Safe Zone at low health.",C.gold,"⬡",5,"BETA")
@@ -376,6 +385,7 @@ local function refreshButtons()
     renderAttach(S.attach)
     renderPersist(S.persist)
     renderPunch(S.punch)
+    renderTankHold(S.tankHold)
 end
 local function setAttach(enabled)
     if enabled then
@@ -387,11 +397,33 @@ local function setAttach(enabled)
         note("Attach loop enabled; will reacquire after respawns")
     else
         S.attach=false
+        S.tankHold=false
+        renderTankHold(false)
         S.attachStatus="OFF"
         note("Attach stopped")
     end
     refreshButtons()
 end
+-- Co-op hold applies to the account executing this script, never an
+-- unwilling target. Run it on the TANK account with attacker selected.
+tankHoldBtn.Activated:Connect(function()
+    if S.tankHold then
+        setAttach(false)
+        tkStatus.Text="Co-op hold released"
+        return
+    end
+    if not target() then
+        tkStatus.Text="Select attacker on TANK client first"
+        note("Co-op hold: select your attacker in the TANK client's player menu")
+        return
+    end
+    S.tankHold=true
+    setAttach(true)
+    if not S.attach then S.tankHold=false end
+    renderTankHold(S.tankHold)
+    tkStatus.Text=S.tankHold and "YOUR avatar held to attacker until RELEASE" or "Hold unavailable"
+    note("Co-op tank hold "..(S.tankHold and "ON" or "OFF").."; release on this client")
+end)
 local function setPunch(enabled)
     if enabled then
         if not target() then
@@ -488,6 +520,34 @@ local function activePunchTool()
     end
     return nil
 end
+
+
+diagnosticBtn.Activated:Connect(function()
+    local ch=LP.Character
+    local backpack=LP:FindFirstChildOfClass("Backpack")
+    local equipped={}
+    local stored={}
+    if ch then
+        for _,item in ipairs(ch:GetChildren()) do
+            if item:IsA("Tool") then table.insert(equipped,item.Name) end
+        end
+    end
+    if backpack then
+        for _,item in ipairs(backpack:GetChildren()) do
+            if item:IsA("Tool") then table.insert(stored,item.Name) end
+        end
+    end
+    local p=punchRemote()
+    local x=string.format("Remote: %s | Equipped: %s | Backpack: %s | Mode: %s | Target: %s",
+        p and "PRESENT (signature unverified)" or "MISSING",
+        #equipped>0 and table.concat(equipped,",") or "none",
+        #stored>0 and table.concat(stored,",") or "none",
+        S.attackMode,
+        S.targetName or "none")
+    S.punchStatus=x
+    punchStatus.Text="Diagnostic printed to executor console"
+    note(x)
+end)
 
 local function tryAttack(sequence)
     -- AUTO tries legitimate equipped Fists Tool, then executor input if present,
@@ -660,7 +720,14 @@ infiniteGrabBtn.Activated:Connect(function()
     if not S.infiniteGrab then clearHeld() end
 end)
 grabBtn.Activated:Connect(grabNearby)
-dropBtn.Activated:Connect(clearHeld)
+dropBtn.Activated:Connect(function()
+    clearHeld()
+    if S.tankHold then
+        setAttach(false)
+        renderTankHold(false)
+        tkStatus.Text="Co-op hold released"
+    end
+end)
 
 local function removeHighlight()
     if S.highlight then pcall(function() S.highlight:Destroy() end) end
@@ -828,7 +895,7 @@ local function redraw()
     footer.Size=UDim2.fromOffset(width-20,32)
     local cols=mobile and 1 or 3
     local cardW=math.max(180,math.floor((cw-20-(cols-1)*10)/cols))
-    layout.CellSize=UDim2.fromOffset(cardW,mobile and 264 or 260)
+    layout.CellSize=UDim2.fromOffset(cardW,mobile and 314 or 310)
     layout.CellPadding=UDim2.fromOffset(10,10)
     for _,record in pairs(cards) do
         local f=record.frame
