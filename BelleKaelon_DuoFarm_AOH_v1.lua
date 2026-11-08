@@ -1,4 +1,4 @@
--- BelleState Utility Hub | BelleKaelonR v3.1 — co-op hold and punch diagnostics
+-- BelleState Utility Hub | BelleKaelonR v3.2 — adaptive rapid hits
 -- Experimental Age of Heroes client UI.
 -- Tested only by static inspection: client-side controls for attach, burst punching,
 -- saved teleports, local TK, emergency return, aura, hover and speed. Server-authoritative
@@ -25,10 +25,12 @@ end
 local S = {
     closed = false, attach = false, punch = false, persist = true,
     targetId = nil, targetName = nil, distance = 3.4,
-    punchInterval = 0.10, rapid = true, punches = 0, nextPunch = 0,
+    punchInterval = 0.04, rapid = true, punches = 0, nextPunch = 0,
     attackMode = "AUTO", burstSize = 100, burstRemaining = 0, burstRunning = false,
     visualUntil = 0, visualSide = 1, effectiveHits = "unknown",
     observedDamage = 0, lastTargetHumanoid=nil, lastTargetHealth=nil,
+    autoMethod=1, autoSince=0, autoAttemptCount=0, autoDamageAtStart=0,
+    autoFound=false, autoActiveName="unknown", maxInputRate=.035,
     status = "Select a consenting player to start",
     attachStatus = "OFF", punchStatus = "OFF",
     compact = false, page = "Farming", minimized = false,
@@ -279,7 +281,7 @@ text(combatCard,"Infinite Punch",13,91,178,23,12,C.text,false)
 local punchToggle,renderPunch=toggle(combatCard,87,C.red)
 text(combatCard,"Punch Interval",13,127,113,22,11,C.muted,false)
 local minus=button(combatCard,"−",126,124,31,26,C.navy,C.red)
-local intervalLabel=text(combatCard,"0.10s",162,127,51,20,11,C.text,true)
+local intervalLabel=text(combatCard,"0.04s",162,127,51,20,11,C.text,true)
 intervalLabel.TextXAlignment=Enum.TextXAlignment.Center
 local plus=button(combatCard,"+",220,124,31,26,C.navy,C.red)
 local rapidButton=button(combatCard,"Rapid: ON",13,157,109,26,C.red,C.red)
@@ -436,7 +438,12 @@ local function setPunch(enabled)
         end
         S.punch=true
         S.nextPunch=0
-        note("Rapid punch enabled at "..string.format("%.2f",S.punchInterval).."s; server cooldowns still apply")
+        S.autoMethod=1
+        S.autoFound=false
+        S.autoSince=os.clock()
+        S.autoAttemptCount=0
+        S.autoDamageAtStart=S.observedDamage
+        note("Adaptive rapid punch at "..string.format("%.2f",S.punchInterval).."s; server hit validation applies")
     else
         S.punch=false;S.punchStatus="OFF"
         S.burstRunning=false;S.burstRemaining=0
@@ -453,8 +460,8 @@ persistToggle.Activated:Connect(function()
 end)
 punchToggle.Activated:Connect(function() setPunch(not S.punch) end)
 local function setPunchInterval(value, isRapid)
-    -- Hard cap: no more than ~14 client calls/sec; actual damage is server-authoritative.
-    S.punchInterval=math.clamp(math.floor(value*100+.5)/100,0.07,0.80)
+    -- Schedules up to 25 input actions/sec; actual hits are game-server authoritative.
+    S.punchInterval=math.clamp(math.floor(value*100+.5)/100,0.04,0.80)
     S.rapid=isRapid==true
     intervalLabel.Text=string.format("%.2fs",S.punchInterval)
     rapidButton.Text=S.rapid and "Rapid: ON" or "Rapid: OFF"
@@ -462,15 +469,15 @@ local function setPunchInterval(value, isRapid)
     if S.punch then S.nextPunch=os.clock()+S.punchInterval end
 end
 minus.Activated:Connect(function()
-    setPunchInterval(S.punchInterval+0.02,false)
+    setPunchInterval(S.punchInterval+0.01,false)
 end)
 plus.Activated:Connect(function()
-    setPunchInterval(S.punchInterval-0.02,false)
+    setPunchInterval(S.punchInterval-0.01,false)
 end)
 rapidButton.Activated:Connect(function()
-    setPunchInterval(S.rapid and 0.30 or 0.10,not S.rapid)
+    setPunchInterval(S.rapid and 0.30 or 0.04,not S.rapid)
 end)
-local modes={"AUTO","TOOL","INPUT","REMOTE"}
+local modes={"AUTO","MOBILE","TOOL","INPUT","REMOTE"}
 attackModeBtn.Activated:Connect(function()
     local i=table.find(modes,S.attackMode) or 1
     S.attackMode=modes[(i%#modes)+1]
@@ -549,43 +556,157 @@ diagnosticBtn.Activated:Connect(function()
     note(x)
 end)
 
-local function tryAttack(sequence)
-    -- AUTO tries legitimate equipped Fists Tool, then executor input if present,
-    -- before falling back to the archived Events.Punch remote.
-    -- Server-side cooldowns and damage checks are never overridden.
-    local tool=(S.attackMode=="AUTO" or S.attackMode=="TOOL") and activePunchTool() or nil
-    if tool then
-        local ok,err=pcall(function() tool:Activate() end)
-        if ok then return true,"Tool:Activate" end
-        if S.attackMode=="TOOL" then return false,tostring(err) end
-    elseif S.attackMode=="TOOL" then
-        return false,"Equip an attack/Fists Tool"
-    end
-    if S.attackMode=="AUTO" or S.attackMode=="INPUT" then
-        local clicker=(type(mouse1click)=="function" and mouse1click)
-            or (type(env.mouse1click)=="function" and env.mouse1click)
-        if clicker then
-            local ok,err=pcall(clicker)
-            if ok then return true,"Executor input" end
-            if S.attackMode=="INPUT" then return false,tostring(err) end
-        else
-            local press=(type(mouse1press)=="function" and mouse1press)
-                or (type(env.mouse1press)=="function" and env.mouse1press)
-            local release=(type(mouse1release)=="function" and mouse1release)
-                or (type(env.mouse1release)=="function" and env.mouse1release)
-            if press and release then
-                local ok,err=pcall(function() press();task.wait(.03);release() end)
-                if ok then return true,"Executor input" end
-                if S.attackMode=="INPUT" then return false,tostring(err) end
+-- Prefer actual game input over an archived RemoteEvent whose arguments are
+-- not confirmed. A client-side success is not proof of a server-recognized hit.
+local function getAttackButton()
+    local playerGui=LP:FindFirstChildOfClass("PlayerGui")
+    if not playerGui then return nil end
+    local choices={}
+    for _,node in ipairs(playerGui:GetDescendants()) do
+        if node:IsA("GuiButton") and node.Visible and node.AbsoluteSize.X>18
+            and node.AbsoluteSize.Y>18 and not node:IsDescendantOf(gui) then
+            local identifier=(node.Name.." "..node.Text):lower()
+            if identifier:find("punch",1,true) or identifier:find("attack",1,true)
+                or identifier:find("fist",1,true) or identifier:find("fight",1,true)
+                or identifier:find("combat",1,true) or identifier:find("m1",1,true) then
+                table.insert(choices,node)
             end
         end
-        if S.attackMode=="INPUT" then return false,"Executor has no supported click simulation" end
     end
-    local remote=punchRemote()
-    if not remote then return false,"Punch RemoteEvent missing" end
-    local ok,err=pcall(function() remote:FireServer(0,0.18,sequence) end)
-    return ok,ok and "Archived remote" or tostring(err)
+    table.sort(choices,function(a,b)
+        local aa=a.AbsolutePosition.X+a.AbsoluteSize.X*.5
+        local bb=b.AbsolutePosition.X+b.AbsoluteSize.X*.5
+        return aa>bb
+    end)
+    return choices[1]
 end
+
+local function sendVirtualClick(position)
+    local ok,manager=pcall(function()
+        return game:GetService("VirtualInputManager")
+    end)
+    if not ok or not manager then return false,"VirtualInputManager unavailable" end
+    local x=math.floor(position.X)
+    local y=math.floor(position.Y)
+    local success,reason=pcall(function()
+        manager:SendMouseButtonEvent(x,y,0,true,game,0)
+        task.wait(.016)
+        manager:SendMouseButtonEvent(x,y,0,false,game,0)
+    end)
+    return success,success and "VirtualInput" or tostring(reason)
+end
+
+local function sendExecutorClick()
+    local clicker=(type(mouse1click)=="function" and mouse1click)
+        or (type(env.mouse1click)=="function" and env.mouse1click)
+    if clicker then
+        local ok,err=pcall(clicker)
+        return ok,ok and "mouse1click" or tostring(err)
+    end
+    local press=(type(mouse1press)=="function" and mouse1press)
+        or (type(env.mouse1press)=="function" and env.mouse1press)
+    local release=(type(mouse1release)=="function" and mouse1release)
+        or (type(env.mouse1release)=="function" and env.mouse1release)
+    if press and release then
+        local ok,err=pcall(function() press();task.wait(.016);release() end)
+        return ok,ok and "mouse1press/release" or tostring(err)
+    end
+    return false,"Executor click functions unavailable"
+end
+
+local function attackByMethod(mode,sequence)
+    if mode=="TOOL" then
+        local tool=activePunchTool()
+        if not tool then return false,"No equipped punch Tool" end
+        local ok,err=pcall(function() tool:Activate() end)
+        return ok,ok and "Equipped punch Tool" or tostring(err)
+    elseif mode=="INPUT" then
+        return sendExecutorClick()
+    elseif mode=="MOBILE" then
+        local button=getAttackButton()
+        if button then
+            local center=button.AbsolutePosition+button.AbsoluteSize*.5
+            local ok,reason=sendVirtualClick(center)
+            if ok then return true,"Game mobile attack button" end
+            -- Some executors expose firesignal; this does not guarantee
+            -- the game engine will treat it as physical user input.
+            local fire=type(firesignal)=="function" and firesignal or
+                (type(env.firesignal)=="function" and env.firesignal)
+            if fire then
+                local signaled=pcall(function() fire(button.Activated) end)
+                if signaled then return true,"Mobile button Activated signal" end
+            end
+            return false,reason
+        end
+        return false,"Game attack button not found"
+    elseif mode=="REMOTE" then
+        local remote=punchRemote()
+        if not remote then return false,"Archived Punch remote missing" end
+        local ok,err=pcall(function() remote:FireServer(0,0.18,sequence) end)
+        return ok,ok and "Archived remote (unverified)" or tostring(err)
+    end
+    return false,"Unsupported mode"
+end
+
+local automaticMethods=UIS.TouchEnabled
+    and {"MOBILE","INPUT","TOOL","REMOTE"}
+    or {"INPUT","TOOL","MOBILE","REMOTE"}
+
+local function tryAttack(sequence)
+    if S.attackMode=="AUTO" then
+        local mode=automaticMethods[S.autoMethod] or automaticMethods[1]
+        S.autoActiveName=mode
+        local ok,detail=attackByMethod(mode,sequence)
+        S.autoAttemptCount=S.autoAttemptCount+1
+        -- Advance immediately when the input API is inaccessible.
+        if not ok then
+            S.autoMethod=S.autoMethod%#automaticMethods+1
+            S.autoSince=os.clock()
+            S.autoAttemptCount=0
+            S.autoDamageAtStart=S.observedDamage
+            return false,mode..": "..detail
+        end
+        return true,mode..": "..detail
+    end
+    S.autoActiveName=S.attackMode
+    return attackByMethod(S.attackMode,sequence)
+end
+
+local function updateObservedDamage(targetHumanoid)
+    if not targetHumanoid then
+        S.lastTargetHumanoid=nil
+        S.lastTargetHealth=nil
+        return
+    end
+    if targetHumanoid~=S.lastTargetHumanoid then
+        S.lastTargetHumanoid=targetHumanoid
+        S.lastTargetHealth=targetHumanoid.Health
+        return
+    end
+    if S.lastTargetHealth and targetHumanoid.Health<S.lastTargetHealth then
+        S.observedDamage=S.observedDamage+(S.lastTargetHealth-targetHumanoid.Health)
+        if S.attackMode=="AUTO" then
+            S.autoFound=true
+        end
+    end
+    S.lastTargetHealth=targetHumanoid.Health
+end
+
+local function updateAutoSelection()
+    if S.attackMode~="AUTO" or S.autoFound or not S.punch then return end
+    if S.autoAttemptCount>=8 and os.clock()-S.autoSince>1.4 then
+        if S.observedDamage>S.autoDamageAtStart then
+            S.autoFound=true
+            return
+        end
+        S.autoMethod=S.autoMethod%#automaticMethods+1
+        S.autoSince=os.clock()
+        S.autoAttemptCount=0
+        S.autoDamageAtStart=S.observedDamage
+        note("No observed HP loss; testing "..automaticMethods[S.autoMethod].." input")
+    end
+end
+
 
 -- Client-side beta modules. These are not claims of game-specific authority.
 local function getMyRoot()
@@ -1064,41 +1185,45 @@ end)
 task.spawn(function()
     local sequence=1
     while not S.closed do
-        task.wait(.02)
+        task.wait(.01)
         if S.punch then
             local other=target()
-            local c,h,r=body(LP)
+            local ch,h,r=body(LP)
             local tc,th,tr=body(other)
-            if not other then S.punchStatus="Waiting for target"
-            elseif not c then S.punchStatus="Waiting for your respawn"
+            updateObservedDamage(th)
+            if not other then S.punchStatus="Waiting for selected target"
+            elseif not ch then S.punchStatus="Waiting for your respawn"
             elseif not tc then S.punchStatus="Waiting for target respawn"
             elseif tc:FindFirstChildOfClass("ForceField") then
                 S.punchStatus="Waiting for spawn protection"
             elseif (r.Position-tr.Position).Magnitude>10 then
-                S.punchStatus="Out of range; enable Attach or move closer"
-            elseif os.clock()>=S.nextPunch then
-                S.nextPunch=os.clock()+S.punchInterval
-                local fired,method=tryAttack(sequence)
-                if fired then
-                    S.punches=S.punches+1
-                    sequence=sequence%5+1
-                    S.visualUntil=os.clock()+0.09
-                    S.visualSide=-S.visualSide
-                    S.punchStatus="Attempt via "..method.."; damage unverified"
-                    if S.burstRunning then
-                        S.burstRemaining=S.burstRemaining-1
-                        if S.burstRemaining<=0 then
-                            S.burstRunning=false
-                            S.punch=false
-                            burstGo.Text="RUN BURST"
-                            refreshButtons()
-                            note("Burst finished: "..S.burstSize.." attempts. Check actual target health.")
+                S.punchStatus="Out of range (enable Attach)"
+            else
+                updateAutoSelection()
+                if os.clock()>=S.nextPunch then
+                    S.nextPunch=os.clock()+S.punchInterval
+                    local attacked,method=tryAttack(sequence)
+                    if attacked then
+                        S.punches=S.punches+1
+                        sequence=sequence%5+1
+                        S.visualUntil=os.clock()+.09
+                        S.visualSide=-S.visualSide
+                        S.punchStatus="Attempt: "..method
+                        if S.burstRunning then
+                            S.burstRemaining=S.burstRemaining-1
+                            if S.burstRemaining<=0 then
+                                S.burstRunning=false
+                                S.punch=false
+                                burstGo.Text="RUN BURST"
+                                refreshButtons()
+                                note("Burst complete: "..S.burstSize..
+                                    " inputs; observed HP loss "..math.floor(S.observedDamage))
+                            end
                         end
+                    else
+                        S.punchStatus=method
+                        S.nextPunch=os.clock()+.20
                     end
-                else
-                    S.punchStatus=tostring(method)
-                    -- If TOOL mode has no Tool, pause rather than spinning indefinitely.
-                    S.nextPunch=os.clock()+.45
                 end
             end
         end
@@ -1157,27 +1282,12 @@ task.spawn(function()
                 math.floor(h.Health),math.floor(h.MaxHealth))
         else hpDisplay.Text="♥ Health: respawning" end
         attachStatus.Text="Status: "..S.attachStatus
-        punchStatus.Text=string.format("Attempts: %d | HP loss seen: %.0f%s", S.punches, S.observedDamage, S.burstRunning and (" | "..S.burstRemaining.." left") or "")
-        local other=target()
-        local _,th=body(other)
-        if th then
-            if th~=S.lastTargetHumanoid then
-                S.lastTargetHumanoid=th
-                S.lastTargetHealth=th.Health
-            elseif S.lastTargetHealth and th.Health<S.lastTargetHealth then
-                S.observedDamage=S.observedDamage+(S.lastTargetHealth-th.Health)
-                S.lastTargetHealth=th.Health
-            else
-                S.lastTargetHealth=th.Health
-            end
-        else
-            S.lastTargetHumanoid=nil
-            S.lastTargetHealth=nil
-        end
+        punchStatus.Text=string.format("Calls: %d | HP loss: %.0f | %s%s", S.punches, S.observedDamage, S.autoActiveName, S.burstRunning and (" | "..S.burstRemaining.." left") or "")
+        -- Health readings are collected in the combat loop (10ms polling).
         footerText.Text=string.format("◆ BelleState Hub   |   Attach: %s   |   Punch: %s",
             S.attach and "ON" or "OFF",S.punch and "ON" or "OFF")
         footerStatus.Text=S.status
         task.wait(.35)
     end
 end)
-note("BelleState v3 loaded. Mobile UI, punch bursts, teleport slots, safety and local abilities are available.")
+note("BelleState v3.2 loaded. Adaptive input and damage monitoring ready.")
